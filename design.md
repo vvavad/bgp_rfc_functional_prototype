@@ -88,13 +88,28 @@ from the DB — total vs. covered vs. gaps, broken down by category, cross-
 checked against AI-reviewed existing-test uploads so a gap already covered by
 a team's real test isn't double-counted.
 
-## AI integration (`ai_generation.py`)
+## AI integration (`ai_generation.py` + `ai_backends.py`)
 
-- Single lazy `Anthropic()` client, gated entirely on `ANTHROPIC_API_KEY`
-  being present in the environment (loaded from `backend/.env` via
-  `python-dotenv`, read at **import time** — hence `app.py` calls
-  `load_dotenv()` before importing `pipeline`).
-- Model: `claude-opus-4-8` by default, overridable via `AI_MODEL`.
+- **Pluggable backend, not a hardcoded client** (`backend/ai_backends.py`):
+  `AIBackend` is a two-method interface (`available()`, `complete(system,
+  user) -> str`). `ClaudeCodeCLIBackend` shells out to the local Claude Code
+  CLI (`claude -p --output-format json --system-prompt ...`), authenticated
+  via that session's own OAuth login (`~/.claude/.credentials.json`) — no
+  separate key. `AnthropicAPIBackend` is the original direct API call,
+  gated on `ANTHROPIC_API_KEY`. Binary discovery order for the CLI backend:
+  `CLAUDE_CLI_PATH` override → `CLAUDE_CODE_EXECPATH` (if this process was
+  itself launched from inside Claude Code) → known VS Code/Cursor extension
+  install globs → `claude` on PATH.
+- `ai_generation._select_backend()` picks one per `AI_BACKEND` (env var:
+  `auto` default = CLI first, then API key, then heuristic; or `cli`/`api`/
+  `heuristic` to force a path). Cached per-process after first check, same
+  pattern as the old single-client lazy singleton it replaced.
+  `ai_generation.get_active_backend_key()` exposes which one is live, both
+  for `/api/status` (`ai.backend`) and per-generated-test provenance
+  (`test_intents.ai_backend`, migrated in via `pipeline._migrate` for DBs
+  created before this column existed).
+- Model: `claude-opus-4-8` by default, overridable via `AI_MODEL` — applies
+  to whichever backend answers (CLI accepts the same aliases/full names).
 - **Design rule that matters:** the model never writes Python. It returns a
   schema-validated JSON "Test Intent" (test type, risk, protocol reasoning,
   steps, assertion hint, PyEZ observation point, a candidate `assertion_code`

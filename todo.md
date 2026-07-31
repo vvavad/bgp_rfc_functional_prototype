@@ -113,44 +113,39 @@ Since the target running environment is Claude Code / a VS Code extension
 that's already authenticated, the ask is to use *that* authentication instead
 of asking a demo operator to provision and paste in a separate key.
 
-- [ ] **Confirm the mechanism before building.** This needs a short spike,
-      not a design decision made blind: check whether the target environment
-      exposes (a) a local `claude` CLI on PATH that supports non-interactive,
-      scriptable prompting (headless/print mode) with output the app can
-      parse, or (b) the Claude Agent SDK importable from Python in that
-      environment, or (c) neither, in which case this item may reduce to
-      "the app can read Claude Code's *existing* credential storage/config to
-      populate `ANTHROPIC_API_KEY` automatically" rather than a different
-      call path. (In this authoring session's Bash tool, `claude` was not on
-      PATH — that may or may not reflect the actual demo machine, so verify
-      there directly.)
-- [ ] **Backend abstraction.** Refactor `ai_generation.py`'s single
-      `_get_client()`/`Anthropic()` call site into a small backend interface
-      with a common `complete(system, user) -> text` shape, so
+- [x] **Confirm the mechanism before building.** Spiked directly: the
+      bundled Claude Code CLI binary (found via `CLAUDE_CODE_EXECPATH` or
+      the VS Code extension's `resources/native-binary/claude`) supports
+      `-p --output-format json` for clean single-line JSON on stdout (trust-
+      dialog/permission warnings go to stderr only), `--system-prompt` fully
+      replaces the default system prompt, `--json-schema` is available for
+      validated structured output, and auth is OAuth-based
+      (`~/.claude/.credentials.json`, subscription-tied) — no
+      `ANTHROPIC_API_KEY` involved. Confirmed with live smoke-test calls
+      before writing any code.
+- [x] **Backend abstraction.** Built `backend/ai_backends.py`: `AIBackend`
+      interface (`available()`, `complete(system, user) -> text`), so
       `generate_ai_test_intent`/`analyze_existing_test_coverage` don't care
-      which backend answered:
-  - [ ] `AnthropicAPIBackend` — today's behavior, gated on
+      which backend answered.
+  - [x] `AnthropicAPIBackend` — today's behavior, gated on
         `ANTHROPIC_API_KEY`.
-  - [ ] `ClaudeCodeBackend` (or whatever the spike confirms) — uses the local
-        Claude Code session, no key required.
-  - [ ] Selection order: explicit `AI_BACKEND` env var if set; otherwise
-        auto-detect (Claude Code backend available? use it; else fall back
-        to API-key check; else heuristic) — keep the existing "always
-        succeeds, just labeled" guarantee, don't introduce a new hard
-        failure mode.
-- [ ] **Badge/labeling update.** The header's "Heuristic mode" /
-      "AI reasoning active · <model>" badge (`app.js:renderHeader`) and the
-      `generation_mode` values stored per test (`ai-high`/`ai-medium`/...)
-      should reflect *which* backend answered, so the catalog stays honest
-      about provenance (e.g. `ai-high` via API key vs. via Claude Code — may
-      not matter to a demo viewer, but matters for the "review" workflow).
-- [ ] **Docs.** Update `README.md`'s "Run it" section once the mechanism is
-      confirmed — likely simplifies to "no key needed inside Claude
-      Code/VS Code; set `ANTHROPIC_API_KEY` only if running standalone."
-- [ ] **Don't regress the standalone path.** Keep the `.env` / API-key mode
-      working for anyone running this outside Claude Code (e.g. a colleague
-      demoing from a plain terminal with a provisioned key) — this is an
-      additive backend option, not a replacement that breaks portability.
+  - [x] `ClaudeCodeCLIBackend` — shells out to the local CLI; binary
+        discovery order: `CLAUDE_CLI_PATH` override → `CLAUDE_CODE_EXECPATH`
+        → known VS Code/Cursor extension install globs → `claude` on PATH.
+  - [x] Selection order: `AI_BACKEND` env var (`auto`/`cli`/`api`/
+        `heuristic`); `auto` (default) tries CLI first, then API key, then
+        heuristic — same "always succeeds, just labeled" guarantee as
+        before, no new hard failure mode.
+- [x] **Badge/labeling update.** `test_intents.ai_backend` column (migrated
+      into existing DBs via `pipeline._migrate`) records which backend
+      answered each generated test; `/api/status`'s `ai.backend` field and
+      the header/catalog badges (`app.js`) surface it.
+- [x] **Docs.** `README.md`'s "Run it" and "AI-powered test generation"
+      sections updated; `.env.example`/`.env` document `AI_BACKEND` and
+      `CLAUDE_CLI_PATH`.
+- [x] **Don't regress the standalone path.** `AnthropicAPIBackend` is
+      untouched behavior-wise, just moved behind the same interface —
+      `AI_BACKEND=api` forces it explicitly if needed.
 
 ---
 

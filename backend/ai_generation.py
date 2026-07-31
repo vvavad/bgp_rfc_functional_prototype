@@ -29,40 +29,76 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+import ai_backends
+
 # Load backend/.env before reading any environment variable below, so the
-# app always picks up ANTHROPIC_API_KEY / AI_MODEL from .env regardless of
-# which module gets imported first or how the process was started. Real
-# process environment variables (if already set) still take precedence.
+# app always picks up ANTHROPIC_API_KEY / AI_MODEL / AI_BACKEND from .env
+# regardless of which module gets imported first or how the process was
+# started. Real process environment variables (if already set) still take
+# precedence.
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
 
 AI_MODEL = os.environ.get("AI_MODEL", "claude-opus-4-8")
-_client = None
-_client_checked = False
+
+# Which backend(s) to try, in order. "auto" (default) prefers the local
+# Claude Code CLI -- already authenticated via that session's own login, no
+# separate key to provision -- and falls back to a direct Anthropic API call
+# (ANTHROPIC_API_KEY) for standalone runs outside Claude Code. "cli" / "api"
+# force one path only (and count as unavailable, not an error, if that path
+# isn't reachable); "heuristic" disables AI entirely regardless of what's
+# configured, useful for demoing/inspecting the fallback path on purpose.
+AI_BACKEND_MODE = os.environ.get("AI_BACKEND", "auto").strip().lower()
+
+_backend = None
+_backend_checked = False
 
 
-def _get_client():
-    """Lazy singleton. Returns None (and logs once) if the SDK or API key
-    isn't available -- callers must treat that as 'use the heuristic path'."""
-    global _client, _client_checked
-    if _client_checked:
-        return _client
-    _client_checked = True
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        logger.warning("ANTHROPIC_API_KEY not set -- AI test generation disabled, using heuristic templates.")
-        return None
-    try:
-        from anthropic import Anthropic
-        _client = Anthropic()
-    except ImportError:
-        logger.warning("anthropic package not installed -- AI test generation disabled, using heuristic templates.")
-        _client = None
-    return _client
+def _select_backend():
+    """Lazy singleton. Returns None (and logs once) if no backend is
+    available under the configured AI_BACKEND_MODE -- callers must treat
+    that as 'use the heuristic path'."""
+    global _backend, _backend_checked
+    if _backend_checked:
+        return _backend
+    _backend_checked = True
+
+    cli_backend = ai_backends.ClaudeCodeCLIBackend(model=AI_MODEL)
+    api_backend = ai_backends.AnthropicAPIBackend(model=AI_MODEL)
+
+    if AI_BACKEND_MODE == "cli":
+        _backend = cli_backend if cli_backend.available() else None
+    elif AI_BACKEND_MODE == "api":
+        _backend = api_backend if api_backend.available() else None
+    elif AI_BACKEND_MODE == "heuristic":
+        _backend = None
+    else:
+        if AI_BACKEND_MODE != "auto":
+            logger.warning(f"Unrecognized AI_BACKEND={AI_BACKEND_MODE!r} -- treating as 'auto'.")
+        if cli_backend.available():
+            _backend = cli_backend
+        elif api_backend.available():
+            _backend = api_backend
+        else:
+            _backend = None
+
+    if _backend is None:
+        logger.warning(f"No AI backend available (AI_BACKEND={AI_BACKEND_MODE}) -- using heuristic templates.")
+    else:
+        logger.info(f"AI backend selected: {_backend.key}")
+    return _backend
 
 
 def ai_available() -> bool:
-    return _get_client() is not None
+    return _select_backend() is not None
+
+
+def get_active_backend_key():
+    """'claude-code-cli' / 'anthropic-api' / None -- for status reporting
+    and per-test provenance (see pipeline.get_ai_status / generate_tests)."""
+    backend = _select_backend()
+    return backend.key if backend else None
 
 
 SYSTEM_PROMPT = """You are a principal network protocol conformance test architect with deep, \
@@ -196,18 +232,13 @@ def generate_ai_test_intent(rfc_label: str, req_row: dict, related: list, artefa
     'ai-high' / 'ai-medium' / 'ai-low' / 'heuristic-fallback:<reason>'.
     artefact_context is optional grounding text built from uploaded product
     specs / other reference material (see pipeline.get_artefact_context)."""
-    client = _get_client()
-    if client is None:
-        return None, "heuristic-fallback:no-api-key"
+    backend = _select_backend()
+    if backend is None:
+        return None, "heuristic-fallback:no-ai-backend"
 
     try:
-        resp = client.messages.create(
-            model=AI_MODEL,
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _build_user_prompt(rfc_label, req_row, related, artefact_context)}],
-        )
-        text = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
+        text = backend.complete(SYSTEM_PROMPT, _build_user_prompt(rfc_label, req_row, related, artefact_context),
+                                 max_tokens=1000)
         obj = json.loads(_strip_fences(text))
     except Exception as e:
         logger.warning(f"AI generation failed for {req_row['requirement_id']}: {e}")
@@ -335,19 +366,16 @@ def analyze_existing_test_coverage(rfc_label: str, filename: str, test_content: 
         return [], "skipped:no-candidates"
 
     candidate_ids = {c["requirement_id"] for c in candidates}
-    client = _get_client()
-    if client is None:
-        return _heuristic_coverage_match(test_content, candidates), "heuristic-fallback:no-api-key"
+    backend = _select_backend()
+    if backend is None:
+        return _heuristic_coverage_match(test_content, candidates), "heuristic-fallback:no-ai-backend"
 
     try:
-        resp = client.messages.create(
-            model=AI_MODEL,
+        text = backend.complete(
+            COVERAGE_SYSTEM_PROMPT,
+            _build_coverage_user_prompt(rfc_label, filename, test_content, candidates, artefact_context),
             max_tokens=1500,
-            system=COVERAGE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": _build_coverage_user_prompt(
-                rfc_label, filename, test_content, candidates, artefact_context)}],
         )
-        text = "".join(block.text for block in resp.content if getattr(block, "type", None) == "text")
         obj = json.loads(_strip_fences(text))
     except Exception as e:
         logger.warning(f"AI coverage review failed for {filename}: {e}")

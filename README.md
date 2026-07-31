@@ -9,15 +9,18 @@ AI-powered test reasoning.
 ```bash
 cd backend
 pip install -r requirements.txt
-cp .env.example .env    # then edit .env and set ANTHROPIC_API_KEY (optional but recommended, see below)
+cp .env.example .env    # defaults to AI_BACKEND=auto -- see below
 python app.py
 ```
 
 `backend/.env` is loaded automatically on every startup (via `python-dotenv`) —
-no shell `export` needed. A `backend/.env` already exists with a blank
-`ANTHROPIC_API_KEY`, so the app runs out of the box in heuristic mode; fill in
-a real key to switch on AI-reasoned generation. See `.env.example` for the
-full list of variables.
+no shell `export` needed. **Running inside a Claude Code session, AI-reasoned
+generation works with no key at all**: `AI_BACKEND=auto` (the default) detects
+the local Claude Code CLI and uses its existing login. Running standalone
+(outside Claude Code), set `ANTHROPIC_API_KEY` in `.env` instead. Neither
+configured → heuristic mode. See `.env.example` for the full list of
+variables and `AI_BACKEND`'s other values (`cli` / `api` / `heuristic`) if you
+want to force a specific path instead of auto-detecting.
 
 Open **http://localhost:5000**
 
@@ -32,8 +35,19 @@ Test generation is no longer a static lookup table. Each requirement is sent,
 with retrieved context, to Claude for actual protocol reasoning before any
 doc/pytest text is produced.
 
+- **Backend, not a hardcoded API client (`backend/ai_backends.py`):** two
+  interchangeable backends implement the same `complete()` call —
+  `ClaudeCodeCLIBackend` shells out to the local Claude Code CLI in
+  non-interactive print mode (`claude -p --output-format json`), authenticated
+  via that session's own login, no key required; `AnthropicAPIBackend` is the
+  original direct API call, gated on `ANTHROPIC_API_KEY`. `AI_BACKEND=auto`
+  (default) prefers the CLI, falls back to the API key, falls back to
+  heuristic — see `.env.example`. Every generated test's catalog entry
+  records which one actually answered (`ai_backend` field), and the header/
+  catalog badges reflect it too.
 - **Model:** `claude-opus-4-8` by default (set via the `AI_MODEL` env var if
-  you want to trade quality for cost/speed, e.g. `claude-sonnet-5`)
+  you want to trade quality for cost/speed, e.g. `claude-sonnet-5`) — applies
+  to whichever backend is active.
 - **Grounding, not a bare prompt:** the model is given the target requirement
   plus 3 semantically related requirements retrieved from the same persisted
   knowledge base (`/api/search`'s TF-IDF index) — real hybrid retrieval, the
@@ -58,13 +72,15 @@ doc/pytest text is produced.
   (after passing a static safety check — no imports, no arbitrary function
   calls, expression-only); medium/low confidence keeps the suggestion as a
   comment and flags the test `needs_review` in the catalog
-- **Graceful fallback:** no `ANTHROPIC_API_KEY` set (or a failed/malformed
-  API response) → generation still succeeds, just via the original heuristic
-  templates, clearly labeled `heuristic-fallback:<reason>` in the catalog and
-  in the doc file itself. The app never blocks on AI availability.
+- **Graceful fallback:** no backend available (neither CLI nor API key), or a
+  failed/malformed response from whichever one answered → generation still
+  succeeds, just via the original heuristic templates, clearly labeled
+  `heuristic-fallback:<reason>` in the catalog and in the doc file itself.
+  The app never blocks on AI availability.
 
-Without a key, the header shows an amber **"Heuristic mode"** badge and every
-generated test is watermarked accordingly — no silent degradation.
+With no backend available, the header shows an amber **"Heuristic mode"**
+badge and every generated test is watermarked accordingly — no silent
+degradation.
 
 ## Gap analysis against your existing test suite
 
@@ -126,7 +142,8 @@ it's visibly a guess.
 backend/
   app.py             Flask routes (read + action APIs); loads .env before anything else
   pipeline.py         extraction, retrieval, generation orchestration, coverage, artefact uploads
-  ai_generation.py     Claude call: system prompt, schema validation, safety checks
+  ai_generation.py     system prompts, schema validation, safety checks (backend-agnostic)
+  ai_backends.py       AI backend abstraction: local Claude Code CLI, or Anthropic API key
   .env                 local environment variables (ANTHROPIC_API_KEY, AI_MODEL) — not committed
   .env.example         documented template for .env
   kb/

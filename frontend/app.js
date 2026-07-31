@@ -79,10 +79,13 @@ function renderHeader(status){
   const aiBadge = document.getElementById('aiBadge');
   if(status.ai && status.ai.ai_available){
     aiBadge.className = 'kb-badge';
-    aiBadge.textContent = `AI reasoning active · ${status.ai.model}`;
+    const backendLabel = status.ai.backend === 'claude-code-cli'
+      ? 'via local Claude Code · no API key'
+      : (status.ai.backend === 'anthropic-api' ? 'via Anthropic API key' : status.ai.backend);
+    aiBadge.textContent = `AI reasoning active · ${status.ai.model} · ${backendLabel}`;
   } else {
     aiBadge.className = 'kb-badge warn';
-    aiBadge.textContent = 'Heuristic mode · set ANTHROPIC_API_KEY for AI-reasoned tests';
+    aiBadge.textContent = 'Heuristic mode · no AI backend available (run inside Claude Code, or set ANTHROPIC_API_KEY)';
   }
 }
 
@@ -243,7 +246,9 @@ function genModeBadge(t){
   if(t.generation_mode && t.generation_mode.startsWith('ai-')){
     const conf = t.generation_mode.replace('ai-','');
     const color = conf==='high' ? 'positive' : (conf==='medium' ? 'boundary' : 'negative');
-    parts.push(`<span class="pill ${color}">AI · ${conf}</span>`);
+    const backendTitle = t.ai_backend === 'claude-code-cli' ? 'via local Claude Code (no API key)'
+      : (t.ai_backend === 'anthropic-api' ? 'via Anthropic API key' : '');
+    parts.push(`<span class="pill ${color}" title="${backendTitle}">AI · ${conf}</span>`);
   } else {
     parts.push(`<span class="pill" style="background:var(--panel-raised);color:var(--text-muted);">heuristic</span>`);
   }

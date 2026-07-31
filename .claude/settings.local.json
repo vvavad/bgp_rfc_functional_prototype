@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -c \"import pypdf\")"
+      "Bash(python3 -c \"import pypdf\")",
+      "Bash(command -v claude)",
+      "Read(//home/venkatesh/.claude/**)",
+      "Bash(npm ls *)",
+      "Bash(env)",
+      "Bash(pip list *)",
+      "Bash(/home/venkatesh/juniper/poc/bgp_rfc_functional_prototype_2/backend/.venv/Scripts/python.exe -m pip list)"
     ]
   }
 }

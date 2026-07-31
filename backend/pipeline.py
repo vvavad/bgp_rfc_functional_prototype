@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS test_intents (
     batch_id INTEGER,
     created_at TEXT,
     generation_mode TEXT DEFAULT 'heuristic',
+    ai_backend TEXT DEFAULT '',
     protocol_reasoning TEXT DEFAULT '',
     requires_peer_emulator INTEGER DEFAULT 0,
     emulator_tool TEXT DEFAULT '',
@@ -135,7 +136,17 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn):
+    """CREATE TABLE IF NOT EXISTS doesn't retrofit columns onto a table that
+    already exists from before this column was added -- this covers that gap
+    for existing kb/knowledge.db files. Cheap no-op once a column exists."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(test_intents)").fetchall()}
+    if "ai_backend" not in cols:
+        conn.execute("ALTER TABLE test_intents ADD COLUMN ai_backend TEXT DEFAULT ''")
 
 
 def _log(conn, event, source):
@@ -766,6 +777,7 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
         related = [r for r in semantic_search(req_dict["statement"], k=4) if r["requirement_id"] != rid][:3]
 
         ai_intent, mode = ai_generation.generate_ai_test_intent(rfc_label, req_dict, related, artefact_context)
+        ai_backend = ai_generation.get_active_backend_key() if ai_intent else ""
 
         if ai_intent:
             test_type = ai_intent["test_type"]
@@ -856,11 +868,12 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
             """INSERT OR REPLACE INTO test_intents
                (test_id, requirement_id, category, test_type, risk, priority, section_id, section_title,
                 statement, keyword, topology, timers, doc_content, pytest_content, derived_from, batch_id,
-                created_at, generation_mode, protocol_reasoning, requires_peer_emulator, emulator_tool, needs_review)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                created_at, generation_mode, ai_backend, protocol_reasoning, requires_peer_emulator,
+                emulator_tool, needs_review)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (test_id, rid, category, test_type, risk, priority, req_dict["section_id"], req_dict["section_title"],
              req_dict["statement"], keyword, "two-router-ebgp", json.dumps(timers), doc_content, pytest_content,
-             derived_from, batch_id, datetime.datetime.now().isoformat(timespec="seconds"), mode,
+             derived_from, batch_id, datetime.datetime.now().isoformat(timespec="seconds"), mode, ai_backend,
              protocol_reasoning, int(requires_emulator), emulator_tool, needs_review),
         )
         conn.execute(
@@ -869,7 +882,8 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
         )
         created.append(test_id)
 
-    ai_mode_note = "AI reasoning" if ai_generation.ai_available() else "heuristic templates (no ANTHROPIC_API_KEY set)"
+    active_backend = ai_generation.get_active_backend_key()
+    ai_mode_note = f"AI reasoning via {active_backend}" if active_backend else "heuristic templates (no AI backend available)"
     _log(
         conn,
         f"TESTS_GENERATED (batch #{batch_id}, {len(created)} new tests, label='{batch_label}', mode={ai_mode_note})",
@@ -974,7 +988,7 @@ def get_test_catalog():
     conn = get_conn()
     rows = conn.execute("SELECT test_id, requirement_id, category, test_type, risk, priority, section_id, "
                          "section_title, statement, keyword, derived_from, batch_id, created_at, "
-                         "generation_mode, requires_peer_emulator, emulator_tool, needs_review "
+                         "generation_mode, ai_backend, requires_peer_emulator, emulator_tool, needs_review "
                          "FROM test_intents ORDER BY created_at").fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -1002,10 +1016,13 @@ def get_rfc_meta():
 
 
 def get_ai_status():
+    available = ai_generation.ai_available()
     return {
-        "ai_available": ai_generation.ai_available(),
-        "model": ai_generation.AI_MODEL if ai_generation.ai_available() else None,
-        "mode": "ai" if ai_generation.ai_available() else "heuristic",
+        "ai_available": available,
+        "model": ai_generation.AI_MODEL if available else None,
+        "backend": ai_generation.get_active_backend_key(),
+        "backend_mode_requested": ai_generation.AI_BACKEND_MODE,
+        "mode": "ai" if available else "heuristic",
     }
 
 
