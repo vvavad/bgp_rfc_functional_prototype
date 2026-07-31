@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RFC Conformance Test Generation — Prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">Calsoft &middot; AI-Assisted Network Test Engineering &middot; Juniper</div>
+  <h1 id="rfcHeading">RFC Conformance Coverage</h1>
+  <div class="subhead" id="rfcSubhead">Loading knowledge base…</div>
+  <div style="margin-bottom:18px;">
+    <span class="kb-badge"><span class="dot"></span><span id="kbBadgeText">connecting…</span></span>
+    <span class="kb-badge" id="aiBadge" style="margin-left:8px;"></span>
+  </div>
+  <div class="stat-row" id="statRow"></div>
+</header>
+
+<nav id="tabNav">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="matrix">Coverage Matrix</button>
+  <button data-tab="catalog">Test Catalog</button>
+  <button data-tab="gaps">Gap Analysis</button>
+  <button data-tab="knowledge">Knowledge Base</button>
+</nav>
+
+<main>
+
+  <!-- OVERVIEW -->
+  <div class="tab active" id="tab-overview">
+    <div class="grid-2 section-gap">
+      <div class="panel">
+        <h2>Coverage by category</h2>
+        <div class="desc">Generated tests vs. total normative statements extracted per category</div>
+        <canvas id="chartCategory"></canvas>
+      </div>
+      <div class="panel">
+        <h2>Generated tests by type</h2>
+        <div class="desc">Distribution across positive / negative / boundary / policy / recovery</div>
+        <canvas id="chartTestType"></canvas>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Semantic search (knowledge base retrieval)</h2>
+      <div class="desc">Query the persisted requirement index directly — this is the same retrieval used internally to build test intents.</div>
+      <div class="filter-row">
+        <input type="text" id="searchInput" placeholder="e.g. hold timer expired, FSM state transition, NEXT_HOP attribute…">
+        <button class="btn" id="searchBtn">Search</button>
+      </div>
+      <table class="data" id="searchResults"><thead><tr><th>Similarity</th><th>Requirement</th><th>Statement</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <!-- MATRIX -->
+  <div class="tab" id="tab-matrix">
+    <div class="panel">
+      <h2>RFC section &times; category traceability matrix</h2>
+      <div class="desc">Each cell = requirements covered / total in that section for that category. Click a populated cell to drill in.</div>
+      <div class="matrix-wrap"><table class="matrix" id="matrixTable"></table></div>
+      <div class="legend">
+        <span><span class="swatch" style="background:#1A263F;"></span>0%</span>
+        <span><span class="swatch" style="background:#4A3B1C;"></span>1–49%</span>
+        <span><span class="swatch" style="background:#5c4d1e;"></span>50–99%</span>
+        <span><span class="swatch" style="background:#1E7A54;"></span>100%</span>
+        <span style="margin-left:auto;">Click any populated cell to drill into requirements</span>
+      </div>
+    </div>
+    <div class="panel section-gap" id="matrixDrilldown" style="display:none;">
+      <h2 id="matrixDrilldownTitle">Requirements</h2>
+      <div class="desc" id="matrixDrilldownDesc"></div>
+      <div class="filter-row">
+        <button class="btn" id="generateSelectedBtn">Generate tests for uncovered rows shown here</button>
+      </div>
+      <table class="data" id="matrixDrilldownTable"><thead><tr><th>Requirement ID</th><th>Keyword</th><th>Statement</th><th>Status</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <!-- CATALOG -->
+  <div class="tab" id="tab-catalog">
+    <div class="panel">
+      <h2>Generated test catalog</h2>
+      <div class="desc">Click any row to view the documented test case and pytest/PyEZ stub.</div>
+      <div class="filter-row">
+        <input type="text" id="catalogSearch" placeholder="Search requirement ID or statement…">
+        <select id="catalogCategoryFilter"><option value="">All categories</option></select>
+        <select id="catalogTypeFilter"><option value="">All test types</option></select>
+        <select id="catalogBatchFilter"><option value="">All batches</option></select>
+      </div>
+      <table class="data" id="catalogTable">
+        <thead><tr><th>Test ID</th><th>Requirement</th><th>Category</th><th>Type</th><th>Risk</th><th>Section</th><th>Batch</th><th>Generation</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- GAPS -->
+  <div class="tab" id="tab-gaps">
+    <div class="panel">
+      <h2>Existing test suite — AI-reviewed coverage</h2>
+      <div class="desc">Upload your team's existing tests (pytest source, documented test cases, exported test-case lists — .py/.txt/.md/.pdf). The AI reviews each one against the RFC requirements, any uploaded product specs, and reports which requirements it actually verifies — not just mentions. Matched requirements are removed from "real gaps" below but always shown separately with the AI's rationale, so nothing is hidden from review.</div>
+      <div class="filter-row">
+        <input type="file" id="existingTestFile" accept=".txt,.md,.pdf,.py">
+        <button class="btn" id="existingTestUploadBtn">Upload existing test</button>
+        <button class="btn btn-small" id="existingTestAnalyzeAllBtn">Analyze all pending</button>
+        <span id="existingTestStatus" class="muted-note"></span>
+      </div>
+      <table class="data" id="existingTestsTable">
+        <thead><tr><th>Filename</th><th>Chars</th><th>Uploaded</th><th>Status</th><th>Matched reqs</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel section-gap">
+      <h2>Gap analysis</h2>
+      <div class="desc">Automatable requirements with no test — generated by this tool <em>or</em> AI-matched from an uploaded existing test — grouped by category with a recommendation for closing each group. Use "Generate" to create tests for that category live.</div>
+      <div class="filter-row">
+        <select id="gapCategoryFilter"><option value="">All categories</option></select>
+      </div>
+      <div id="gapGroups"></div>
+    </div>
+
+    <div class="panel section-gap" id="existingCoveragePanel" style="display:none;">
+      <h2>Flagged as covered by an existing test</h2>
+      <div class="desc">These requirements have no generated test, but the AI review matched them to one of your uploaded existing tests. Not auto-trusted — check the rationale and confidence before treating the gap as closed.</div>
+      <div id="existingCoverageList"></div>
+    </div>
+  </div>
+
+  <!-- KNOWLEDGE BASE -->
+  <div class="tab" id="tab-knowledge">
+    <div class="panel">
+      <h2>Knowledge base activity log</h2>
+      <div class="desc">Every ingestion and generation event, in order, as recorded in <code>kb/knowledge.db</code>. Notice generation events never re-touch the raw RFC text.</div>
+      <div class="timeline" id="ingestionTimeline"></div>
+    </div>
+
+    <div class="panel section-gap">
+      <h2>Ingest a different RFC</h2>
+      <div class="desc">Replaces the current knowledge base and clears previously generated tests. This is the only action that reads raw RFC text — everything else in this app reads from the database it produces.</div>
+      <div class="filter-row">
+        <input type="text" id="ingestNumber" placeholder="RFC number, e.g. 2328" style="max-width:140px;">
+        <input type="text" id="ingestTitle" placeholder="RFC title, e.g. OSPF Version 2" style="min-width:280px;">
+      </div>
+      <div class="filter-row">
+        <input type="file" id="ingestFile" accept=".txt,.md,.pdf">
+        <button class="btn btn-warn" id="ingestFileBtn">Upload file & rebuild knowledge base</button>
+        <span class="muted-note">— or paste the full text below instead</span>
+      </div>
+      <textarea id="ingestText" placeholder="Paste the full RFC text here…" rows="8" style="width:100%;margin-bottom:12px;"></textarea>
+      <button class="btn btn-warn" id="ingestBtn">Re-ingest pasted text & rebuild knowledge base</button>
+      <span id="ingestStatus" class="muted-note" style="margin-left:12px;"></span>
+    </div>
+
+    <div class="panel section-gap">
+      <h2>Supporting artefacts — product specs & other context</h2>
+      <div class="desc">Upload product specs, feature guides, or other reference material (.txt, .md, .pdf). These are handed to the AI as extra grounding when reasoning about test intents — they don't replace the RFC and are never used for requirement extraction.</div>
+      <div class="filter-row">
+        <select id="artefactType">
+          <option value="product_spec">Product spec (Junos / vJunos-router feature doc)</option>
+          <option value="other">Other reference material</option>
+        </select>
+        <input type="file" id="artefactFile" accept=".txt,.md,.pdf">
+        <button class="btn" id="artefactUploadBtn">Upload artefact</button>
+        <span id="artefactStatus" class="muted-note"></span>
+      </div>
+      <table class="data" id="artefactsTable">
+        <thead><tr><th>Type</th><th>Filename</th><th>Extracted chars</th><th>Uploaded</th><th>Status</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <div><h3 id="modalTestId"></h3></div>
+      <button class="modal-close" id="modalClose">&times;</button>
+    </div>
+    <div class="modal-tabs">
+      <button data-pane="doc" class="active">Documented test case</button>
+      <button data-pane="pytest">pytest / PyEZ stub</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-pane active" id="pane-doc"><div class="doc-render" id="modalDocContent"></div></div>
+      <div class="modal-pane" id="pane-pytest"><pre id="modalPytestContent"></pre></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

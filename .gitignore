@@ -1,0 +1,20 @@
+# Virtual environments
+.venv/
+backend/.venv/
+
+# Secrets
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Knowledge base — generated/derived at runtime, not source
+backend/kb/knowledge.db
+backend/kb/retrieval_index.pkl
+backend/kb/artefacts/
+backend/kb/uploaded_tests/
+
+# Generated test output — derived from the knowledge base, not source
+backend/generated_tests/docs/
+backend/generated_tests/pytest/
