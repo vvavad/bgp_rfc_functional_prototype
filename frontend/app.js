@@ -53,6 +53,7 @@ async function refreshAll(){
 
   renderStats(coverage);
   renderCharts(coverage, catalog);
+  renderGenQuality(catalog);
   renderMatrix(matrix);
   renderCatalog();
   renderGaps(coverage);
@@ -73,7 +74,8 @@ function renderHeader(status){
   const meta = status.rfc;
   if(meta){
     document.getElementById('rfcHeading').textContent = `${meta.rfc_title} (RFC ${meta.rfc_number}) — Conformance Coverage`;
-    document.getElementById('rfcSubhead').textContent = `Requirement-to-test traceability for the BGP proof of concept · target: Juniper vJunos-router / vMX`;
+    const protocolLabel = meta.protocol_display_name || 'this protocol';
+    document.getElementById('rfcSubhead').textContent = `Requirement-to-test traceability for ${protocolLabel} · target: Juniper vJunos-router / vMX`;
   }
   document.getElementById('kbBadgeText').textContent = 'Knowledge base persisted · RFC parsed once · live generation from database';
   const aiBadge = document.getElementById('aiBadge');
@@ -135,6 +137,27 @@ function renderCharts(cov, catalog){
     },
     options: { plugins:{legend:{position:'right', labels:{color:'#8C9BB8', font:{family:'IBM Plex Mono', size:11}}}} }
   });
+}
+
+function renderGenQuality(catalog){
+  const row = document.getElementById('genQualityRow');
+  const total = catalog.length;
+  if(total === 0){
+    row.innerHTML = '<div class="stat"><div class="num">—</div><div class="lbl">No tests generated yet</div></div>';
+    return;
+  }
+  const highConf = catalog.filter(t => t.generation_mode === 'ai-high').length;
+  const needsReview = catalog.filter(t => t.needs_review).length;
+  const emulatorNeeded = catalog.filter(t => t.requires_peer_emulator).length;
+  const heuristic = catalog.filter(t => !t.generation_mode || !t.generation_mode.startsWith('ai-')).length;
+  const stats = [
+    {num: total, lbl: 'Total Tests', cls:''},
+    {num: `${highConf} (${Math.round(100*highConf/total)}%)`, lbl: 'High Confidence', cls:'accent-green'},
+    {num: `${needsReview} (${Math.round(100*needsReview/total)}%)`, lbl: 'Needs Review', cls:'accent-amber'},
+    {num: emulatorNeeded, lbl: 'Requires Peer Emulator', cls:'accent-amber'},
+    {num: heuristic, lbl: 'Heuristic (no AI)', cls: heuristic > 0 ? 'accent-amber' : ''},
+  ];
+  row.innerHTML = stats.map(s => `<div class="stat ${s.cls}"><div class="num">${s.num}</div><div class="lbl">${s.lbl}</div></div>`).join('');
 }
 
 // ---------- Semantic search ----------
@@ -383,6 +406,28 @@ function paintGaps(cov, filterCat){
   });
 }
 
+document.getElementById('generateAllGapsBtn').addEventListener('click', async () => {
+  const cov = STATE.coverage;
+  const gapCount = (cov.gaps_after_existing_tests || cov.gaps || []).length;
+  if(gapCount === 0){ toast('No remaining gaps to fill.'); return; }
+  if(!confirm(`Generate tests for all ${gapCount} remaining gap(s)? This calls the AI backend for each one and may take a while (roughly a few seconds per test, several running concurrently).`)) return;
+  const btn = document.getElementById('generateAllGapsBtn');
+  const status = document.getElementById('generateAllGapsStatus');
+  btn.disabled = true; btn.textContent = 'Generating…';
+  status.textContent = `Generating ${gapCount} test(s) — this can take several minutes for a large batch…`;
+  try{
+    const result = await api('/generate-all', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
+    status.textContent = `Done — ${result.created.length} test(s) created.`;
+    toast(`Generated ${result.created.length} test(s) across all remaining gaps.`);
+    await refreshAll();
+  }catch(e){
+    status.textContent = '';
+    toast('Bulk generation failed: ' + e.message, true);
+  }finally{
+    btn.disabled = false; btn.textContent = 'Generate all remaining gaps';
+  }
+});
+
 function confidencePill(conf){
   const color = conf==='high' ? 'positive' : (conf==='medium' ? 'boundary' : 'negative');
   return `<span class="pill ${color}">${conf} confidence</span>`;
@@ -497,6 +542,7 @@ document.getElementById('ingestBtn').addEventListener('click', async () => {
   const rfc_number = document.getElementById('ingestNumber').value.trim();
   const rfc_title = document.getElementById('ingestTitle').value.trim();
   const raw_text = document.getElementById('ingestText').value;
+  const protocol = document.getElementById('ingestProtocol').value;
   if(!rfc_number || !raw_text){ toast('RFC number and text are required.', true); return; }
   if(!confirm('This replaces the current knowledge base and clears all generated tests. Continue?')) return;
   const status = document.getElementById('ingestStatus');
@@ -504,7 +550,7 @@ document.getElementById('ingestBtn').addEventListener('click', async () => {
   try{
     const result = await api('/ingest', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({rfc_number, rfc_title, raw_text})
+      body: JSON.stringify({rfc_number, rfc_title, raw_text, protocol})
     });
     status.textContent = `Done — ${result.requirement_count} requirements extracted.`;
     toast(`Re-ingested RFC ${rfc_number}: ${result.requirement_count} requirements extracted.`);
@@ -520,6 +566,7 @@ document.getElementById('ingestBtn').addEventListener('click', async () => {
 document.getElementById('ingestFileBtn').addEventListener('click', async () => {
   const rfc_number = document.getElementById('ingestNumber').value.trim();
   const rfc_title = document.getElementById('ingestTitle').value.trim();
+  const protocol = document.getElementById('ingestProtocol').value;
   const file = document.getElementById('ingestFile').files[0];
   if(!rfc_number || !file){ toast('RFC number and a file are required.', true); return; }
   if(!confirm('This replaces the current knowledge base and clears all generated tests. Continue?')) return;
@@ -528,6 +575,7 @@ document.getElementById('ingestFileBtn').addEventListener('click', async () => {
   const form = new FormData();
   form.append('rfc_number', rfc_number);
   form.append('rfc_title', rfc_title);
+  form.append('protocol', protocol);
   form.append('rfc_file', file);
   try{
     const result = await api('/ingest/upload', { method:'POST', body: form });

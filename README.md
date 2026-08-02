@@ -1,8 +1,17 @@
 # RFC Conformance Test Generation — Functional Prototype
 
-BGP (RFC 4271) proof of concept for Juniper vJunos-router/vMX. Python (Flask)
-backend, lightweight HTML/CSS/JS frontend, SQLite-backed knowledge base,
-AI-powered test reasoning.
+BGP (RFC 4271) proof of concept for Juniper vJunos-router/vMX — the flagship,
+most-tested path. Python (Flask) backend, lightweight HTML/CSS/JS frontend,
+SQLite-backed knowledge base, AI-powered test reasoning.
+
+The requirement-classification rules, default topology, Junos config
+template, and PyEZ observation point are no longer hardcoded to BGP —
+they come from a per-protocol profile (`backend/protocol_profiles.py`),
+resolved automatically from the ingested RFC's number/title (with a manual
+override on the ingest form/API if needed). BGP and OSPF (RFC 2328) both
+have dedicated profiles today; an RFC for any other protocol falls back to
+a generic profile (protocol-neutral categories only, clearly-marked
+placeholder templates) rather than silently assuming BGP.
 
 ## Run it
 
@@ -142,6 +151,7 @@ it's visibly a guess.
 backend/
   app.py             Flask routes (read + action APIs); loads .env before anything else
   pipeline.py         extraction, retrieval, generation orchestration, coverage, artefact uploads
+  protocol_profiles.py per-protocol defaults: category rules, topology, config template, PyEZ observation
   ai_generation.py     system prompts, schema validation, safety checks (backend-agnostic)
   ai_backends.py       AI backend abstraction: local Claude Code CLI, or Anthropic API key
   .env                 local environment variables (ANTHROPIC_API_KEY, AI_MODEL) — not committed
@@ -183,8 +193,9 @@ shows every `TESTS_GENERATED` event tagged with its generation mode.
 | GET | `/api/existing-tests` | uploaded existing tests + their AI-reviewed RFC coverage status |
 | POST | `/api/generate` | `{requirement_ids: [...], label, derived_from}` |
 | POST | `/api/generate-by-category` | `{category, count}` — generate N tests for a gap category |
-| POST | `/api/ingest` | `{rfc_number, rfc_title, raw_text}` — replace the knowledge base with pasted text |
-| POST | `/api/ingest/upload` | multipart `{rfc_number, rfc_title, rfc_file}` (.txt/.md/.pdf) — same as above, from an uploaded file |
+| POST | `/api/generate-all` | `{limit?}` — bulk-fill every remaining automatable gap (optionally capped) in one call, running concurrently (`AI_GENERATION_CONCURRENCY`, default 4) |
+| POST | `/api/ingest` | `{rfc_number, rfc_title, raw_text, protocol?}` — replace the knowledge base with pasted text (`protocol` optionally overrides auto-detection, e.g. `bgp`/`ospf`/`generic`) |
+| POST | `/api/ingest/upload` | multipart `{rfc_number, rfc_title, rfc_file, protocol?}` (.txt/.md/.pdf) — same as above, from an uploaded file |
 | POST | `/api/artefacts/upload` | multipart `{artefact_type, file}` (.txt/.md/.pdf) — upload a product spec or other reference material |
 | DELETE | `/api/artefacts/<id>` | remove an uploaded artefact |
 | POST | `/api/existing-tests/upload` | multipart `{file}` (.py/.txt/.md/.pdf) — upload an existing test to review against the RFC |

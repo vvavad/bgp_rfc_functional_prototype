@@ -16,86 +16,148 @@ categories, generation prompts, and templates — not BGP vocabulary bent onto
 a different protocol. See `design.md`'s "Where BGP is hard-coded" section for
 the 6 concrete coupling points this touches.
 
-- [ ] **Protocol profile abstraction.** Introduce a `protocol_profiles.py` (or
-      similar) with one profile per protocol: category keyword rules, default
-      topology description, default PyEZ observation call, config template
-      snippet, example AS/router naming. Start with `bgp` (extracted verbatim
-      from current `CATEGORY_RULES`/templates) and one second profile (`ospf`
-      is the natural pick — RFC 2328 is a good test case and PyEZ has
-      `get_ospf_neighbor_information`) to prove the abstraction isn't
-      BGP-shaped in disguise.
-  - [ ] Move `CATEGORY_RULES` into the profile; keep a protocol-neutral
-        fallback rule set (timer/error_handling/message_format/
-        capability_negotiation/general_conformance are already generic enough
-        to keep as shared defaults).
-  - [ ] Store the active protocol on `rfc_meta` (new column, e.g.
-        `protocol_key`) at ingest time — inferred from RFC number/title
-        against a known table, with a manual override param on `/api/ingest`
-        for RFCs the table doesn't recognize.
-  - [ ] Parameterize `DOC_TEMPLATE`/`PYTEST_TEMPLATE` topology/config/RPC
-        fields from the active profile instead of literal BGP strings.
-- [ ] **AI prompt parameterization.** Thread the active protocol profile into
-      `ai_generation.SYSTEM_PROMPT` / `_build_user_prompt` — protocol name,
-      default topology, and known observation RPCs become template
-      variables, not hardcoded prose. Keep the deep-expertise framing
-      (BGP/OSPF/IS-IS/MPLS/EVPN/Junos/PyEZ/YANG) since that's genuinely
-      protocol-general.
-- [ ] **Frontend copy.** Replace the hardcoded "BGP proof of concept" strings
-      in `index.html`/`app.js` (`renderHeader`) with the active protocol name
-      pulled from `/api/status`.
-- [ ] **Unknown-protocol fallback.** When ingesting an RFC that doesn't match
-      a known profile, fall back to a generic profile (already-generic
-      category rules, protocol-neutral topology language: "two conformant
-      peers") rather than defaulting to BGP assumptions silently.
-- [ ] **Regression check.** Re-run ingest + generate against the bundled RFC
-      4271 after the refactor and diff a sample of generated docs/pytest
-      against current output — this must not degrade the BGP demo, since
-      that's still the flagship path.
+- [x] **Protocol profile abstraction.** `protocol_profiles.py`: one
+      `ProtocolProfile` per protocol (category rules, topology description,
+      timer fields + per-category override, `string.Template`-based Junos
+      config stanza, PyEZ observation call/field/result-var, default
+      emulator tool, AI expertise note). `bgp` extracted verbatim from the
+      original `CATEGORY_RULES`/templates (regression-verified — see below).
+      `ospf` (RFC 2328) is the second profile, proven end-to-end. `generic`
+      is the fallback for anything unrecognized (common categories only,
+      clearly-marked placeholder config/observation, no BGP assumptions).
+  - [x] `CATEGORY_RULES` moved into profiles; `protocol_profiles.COMMON_CATEGORY_RULES`
+        (timer/message_format/error_handling/capability_negotiation) shared
+        by all profiles, tried after each profile's own rules.
+  - [x] `rfc_meta.protocol_key` column, resolved at ingest time
+        (`protocol_profiles.resolve_profile`, RFC-number match then
+        title-keyword scan then generic) with a manual `protocol` override
+        param on `/api/ingest` and `/api/ingest/upload` (and a select in the
+        Knowledge Base tab's ingest form).
+  - [x] `DOC_TEMPLATE`/`PYTEST_TEMPLATE` topology/timers/config-stanza/
+        observation fields all sourced from the active profile
+        (`pipeline._generate_one`) instead of literal BGP strings. The
+        AI's own `pyez_observation` suggestion stays advisory documentation
+        only — the literal RPC call the rendered pytest stub actually
+        executes always comes from the trusted profile, same safety
+        boundary as `assertion_code`.
+- [x] **AI prompt parameterization.** `ai_generation.SYSTEM_PROMPT_TEMPLATE` /
+      `COVERAGE_SYSTEM_PROMPT_TEMPLATE` (both `string.Template`, not
+      `.format()` — the JSON schema examples are dense with literal `{ }`
+      that would collide with `.format()`'s field syntax) take the active
+      profile's topology description, emulator-tool examples/enum, and
+      expertise note. Verified the OSPF-profile prompt actually changes
+      model behavior, not just labels: the AI's `protocol_reasoning` for a
+      real OSPF requirement referenced Type-1 router-LSAs, Router-IDs, and
+      the LSDB specifically — not BGP vocabulary reused.
+- [x] **Frontend copy.** `renderHeader()` now reads `meta.protocol_display_name`
+      from `/api/status` instead of a hardcoded "BGP proof of concept" string.
+- [x] **Unknown-protocol fallback.** `GENERIC_PROFILE` — common categories
+      only, topology text says "two conformant peers," config/observation
+      are explicit `TODO` placeholders naming `rfc_meta.protocol_key` rather
+      than guessing BGP.
+- [x] **Regression check.** Generated a fresh BGP test after the full
+      refactor landed (`RFC4271-S6.1-REQ-03`, a timer-category requirement
+      to specifically exercise the hold-time override path) — topology line,
+      timers (hold=6 override correctly applied), Junos config stanza, and
+      the `get_bgp_neighbor_information()`/`.//peer-state` observation call
+      all matched the pre-refactor hardcoded output exactly.
+  - **Second-protocol proof, done safely:** `ingest_rfc()` is destructive
+    (wipes `requirements`/`test_intents`, clears `generated_tests/`), so
+    re-ingesting a real OSPF RFC into the live `kb/knowledge.db` would have
+    destroyed today's real BGP demo data. Instead, ran a throwaway script
+    that monkeypatches `pipeline.DB_PATH`/`RETRIEVAL_INDEX_PATH`/`DOCS_DIR`/
+    `PYTEST_DIR` to a temp directory, ingested synthetic OSPF-2328-style
+    text, and generated real tests through the live AI backend — categories
+    (lsa_flooding/neighbor_adjacency/spf_calculation/area_management/
+    authentication), topology, timers, config stanza, and observation call
+    were all correctly OSPF-flavored, and the live BGP DB was never touched.
+    Temp dir cleaned up after.
+  - **Bug found and fixed during this check:** `_migrate()`'s protocol_key
+    backfill was a DML `UPDATE`, but `get_conn()` never commits and several
+    read-only call sites (including `get_active_profile()` itself, and my
+    own first verification script) only `SELECT` + close — so the backfill
+    silently rolled back, and since the `ALTER TABLE` had already persisted,
+    the `if column not in cols` guard meant it would never retry. Fixed by
+    having `_migrate()` commit its own changes before returning, and
+    manually repaired the already-corrupted live `rfc_meta.protocol_key`
+    value. Worth remembering for any future migration that both alters
+    schema and backfills data: don't rely on the caller to commit.
 
-Effort note: this is the largest of the three asks. Recommend scoping the
-first pass to "BGP profile extracted cleanly + one second protocol proven
-end-to-end," not full coverage of every protocol named in the system prompt.
+Landed for both `bgp` and `ospf`; a third protocol is a matter of adding one
+more `ProtocolProfile`, not touching pipeline.py/ai_generation.py again.
 
 ---
 
 ## 2. Increase test coverage against RFC-derived requirements
 
-Current state (see `design.md`): RFC 4271 ingest yields 203 requirements
-(196 automatable), bootstrap seed only generates 28 (~14% coverage). The
-generation machinery already exists (`generate_tests`,
-`/api/generate-by-category`, matrix drill-down); this is about actually
-running it further and making sure quality holds up at volume, not new
-plumbing.
+Starting state (see `design.md`): RFC 4271 ingest yields 203 requirements
+(196 automatable), bootstrap seed only generated 28 (~14% coverage). Current
+state after this pass: **77 tests generated, automatable coverage 39.3%**
+(overall 37.9%), 119 gaps remaining — real generation, not padding (see the
+quality summary below).
 
-- [ ] **Bulk-generate to raise default coverage.** Add a way to generate
-      "all remaining automatable gaps" in one action — a `/api/generate-all`
-      endpoint or a `--all` bootstrap flag — rather than only 3-per-category
-      or 5-per-category-on-demand. Batch/paginate the AI calls (existing loop
-      in `generate_tests` is sequential; at 196 requirements this is 196
-      sequential Claude calls — worth at least a progress-visible batching
-      strategy, and consider concurrency with a small worker pool if the
-      Anthropic SDK usage supports it safely).
-  - [ ] Decide and surface a default target (e.g. seed script generates for
-        *all* automatable requirements instead of 3/category) so the
-        dashboard's out-of-the-box coverage number is demo-credible, not 14%.
-- [ ] **Quality bar to trust the higher volume, not just the count:**
-  - [ ] Add a lightweight self-check pass: after bulk generation, summarize
-        `needs_review` / `requires_peer_emulator` / confidence distribution
-        so "more tests" doesn't quietly mean "more low-confidence tests."
-        (The data already exists in `test_intents` — this is a report, not
-        new generation logic.)
-  - [ ] Spot-check generated pytest stubs still parse (`python -m py_compile`
-        or `ast.parse` over `generated_tests/pytest/*.py`) as a cheap
-        post-generation smoke test — catches template-rendering regressions
-        before they reach the catalog.
-- [ ] **Requirement-extraction coverage, not just test coverage.** Worth a
-      pass at whether `_split_into_statements`/`SECTION_RE` are missing
-      requirements (e.g. multi-sentence normative statements, tables,
-      requirements phrased without a clean sentence boundary) — extraction
-      recall directly caps how high "coverage against RFC-derived
-      requirements" can even go. Suggest a manual audit: sample a few RFC
-      4271 sections, count MUST/SHOULD/MAY statements by eye, compare to what
-      got extracted.
+- [x] **Bulk-generate to raise default coverage.** `pipeline.generate_all_gaps()`
+      + `POST /api/generate-all` (optional `{limit}`), plus a "Generate all
+      remaining gaps" button in the Gap Analysis tab. `generate_tests`'s
+      inner loop now fans the AI-call/render step for each requirement out
+      across a `ThreadPoolExecutor` (`AI_GENERATION_CONCURRENCY`, default 4)
+      — DB writes and file writes still happen sequentially afterward on a
+      single connection, only the I/O-bound AI calls run concurrently. Ran
+      a real 40-test batch end-to-end (~5.3 minutes wall time, all 40
+      succeeded, no failures) to prove the concurrency path — see the race
+      condition found and fixed below.
+  - **Concurrency bug found and fixed:** `ai_generation._select_backend()`'s
+    memoization wasn't thread-safe — two threads racing the very first call
+    could both see `_backend_checked` flip `True` before `_backend` was
+    actually assigned, so one of them read the still-`None` default and
+    incorrectly fell back to heuristic (`generation_mode:
+    heuristic-fallback:no-ai-backend`) even though the backend was genuinely
+    available. Fixed with proper double-checked locking (`threading.Lock`).
+    Verified by re-running a 4-item concurrent batch and confirming all 4
+    now correctly show `ai_backend: claude-code-cli`.
+  - Decided the out-of-the-box seed question: left the bootstrap seed at
+    its existing demo-scale default (fast first-launch startup) rather than
+    generating for all ~196 automatable requirements on every fresh
+    install — bulk-fill is now a deliberate, on-demand action
+    (`/api/generate-all` or the button) to run before a demo, not something
+    that slows down every casual first run.
+- [x] **Quality bar to trust the higher volume, not just the count:**
+  - [x] Overview tab now has a "Generation quality" panel (`app.js:renderGenQuality`,
+        computed client-side from the already-loaded catalog): total tests,
+        high-confidence count/%, needs-review count/%, peer-emulator-required
+        count, heuristic-fallback count — so a big bulk-generation run is
+        visibly checked for confidence distribution, not just a bigger
+        headline number.
+  - [x] `backend/verify_generated_tests.py` — `ast.parse`s every generated
+        pytest stub as a post-generation smoke test. Run after the 40-test
+        bulk batch and again after the protocol-agnostic refactor's
+        regression test: 77/77 valid both times.
+- [x] **Requirement-extraction coverage audit — done, real finding.**
+      Cross-checked two ways: (1) a naive whole-document keyword-sentence
+      recount (bypassing section boundaries entirely) matched the DB's
+      extracted count exactly (203=203) — section splitting isn't dropping
+      keyword-bearing text at section edges. (2) Manual read of §5.1.2
+      (AS_PATH) surfaced a real gap: `_split_into_statements` only splits on
+      `". " + capital letter`, so RFC-style lettered/numbered sub-lists under
+      one lead-in sentence — e.g. the AS_PATH modification rules ("a) ...
+      the advertising speaker SHALL NOT modify..." / "b) ... 1) ... it
+      SHOULD prepend..." / "2) ..." / "3) ...") — get merged into a single
+      oversized "requirement" instead of split into the ~4-5 independently
+      testable statements they actually contain. This is under-segmentation,
+      not text loss: nothing is silently missing, but distinct MUST/SHOULD
+      clauses are bundled together, undercounting true requirement count and
+      producing harder-to-test multi-clause statements.
+  - [ ] **Follow-up fix (not done — deliberately deferred):** teach
+        `_split_into_statements` to also break before lettered/numbered list
+        markers (`a)`, `b)`, `1)`, `2)`...) following a colon-introduced lead
+        sentence. Deferred because `ingest_rfc()` is destructive — it wipes
+        `requirements`/`test_intents` and clears `generated_tests/` on every
+        re-ingest, and requirement IDs are assigned by per-section sequence
+        order, so improving the splitter and re-ingesting would renumber
+        requirements and orphan every already-generated test (including the
+        real ones generated today). Do this as its own deliberate pass, with
+        a plan for either accepting the reset or migrating existing
+        `test_intents` rows to their nearest new requirement ID first.
 - [ ] **Actual test-count metric for "coverage" as demoed.** Decide what
       number the demo leads with: `overall_coverage_pct` (against *all*
       requirements, including non-automatable) or

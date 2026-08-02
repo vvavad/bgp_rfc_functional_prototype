@@ -9,15 +9,28 @@ never from the raw RFC text again. That "read once, reuse forever" property
 is the thing this prototype needs to prove, so it's structural here, not a
 one-off demo script.
 """
+import os
 import re
 import json
+import logging
 import sqlite3
 import pickle
 import datetime
 from pathlib import Path
+from string import Template
 from collections import defaultdict, Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ai_generation
+import protocol_profiles
+
+logger = logging.getLogger(__name__)
+
+# How many requirements to run through AI generation concurrently. Each call
+# is I/O-bound (a subprocess or a network request), so a modest thread pool
+# gets real wall-clock savings on bulk generation without hammering the
+# machine -- override via env var if the local box can take more/less.
+GENERATION_CONCURRENCY = max(1, int(os.environ.get("AI_GENERATION_CONCURRENCY", "4")))
 
 BASE = Path(__file__).resolve().parent
 KB_DIR = BASE / "kb"
@@ -45,7 +58,8 @@ CREATE TABLE IF NOT EXISTS rfc_meta (
     rfc_number TEXT,
     rfc_title TEXT,
     source TEXT,
-    ingested_at TEXT
+    ingested_at TEXT,
+    protocol_key TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS requirements (
@@ -143,10 +157,34 @@ def get_conn():
 def _migrate(conn):
     """CREATE TABLE IF NOT EXISTS doesn't retrofit columns onto a table that
     already exists from before this column was added -- this covers that gap
-    for existing kb/knowledge.db files. Cheap no-op once a column exists."""
+    for existing kb/knowledge.db files. Cheap no-op once a column exists.
+
+    Commits its own changes before returning -- get_conn() is called by
+    plenty of read-only code paths that never call conn.commit() themselves
+    (they only SELECT), which is fine for pure schema changes (SQLite
+    auto-commits DDL) but NOT fine for the protocol_key backfill below,
+    which is a DML UPDATE: without an explicit commit here, a caller that
+    reads-and-closes without committing would silently roll it back --
+    and since the ALTER TABLE already persisted, the `if column not in
+    cols` guard would then never retry the backfill again. (Found exactly
+    this bug during item 1's regression check -- see todo.md/design.md.)"""
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(test_intents)").fetchall()}
     if "ai_backend" not in cols:
         conn.execute("ALTER TABLE test_intents ADD COLUMN ai_backend TEXT DEFAULT ''")
+
+    rfc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rfc_meta)").fetchall()}
+    if "protocol_key" not in rfc_cols:
+        conn.execute("ALTER TABLE rfc_meta ADD COLUMN protocol_key TEXT DEFAULT ''")
+        # Backfill the existing row (if any) by re-resolving from its stored
+        # rfc_number/title -- without this, an already-ingested RFC (e.g.
+        # today's live BGP demo data) would silently fall back to the
+        # generic profile instead of keeping its correct one after upgrade.
+        row = conn.execute("SELECT rfc_number, rfc_title FROM rfc_meta WHERE id=1").fetchone()
+        if row:
+            profile = protocol_profiles.resolve_profile(row["rfc_number"], row["rfc_title"])
+            conn.execute("UPDATE rfc_meta SET protocol_key=? WHERE id=1", (profile.key,))
+
+    conn.commit()
 
 
 def _log(conn, event, source):
@@ -351,7 +389,7 @@ def analyze_uploaded_test_coverage(uploaded_test_id: int):
     test_content = test_row["content_text"][:MAX_TEST_CONTENT_CHARS]
 
     result, mode = ai_generation.analyze_existing_test_coverage(
-        rfc_label, test_row["filename"], test_content, candidates, artefact_context
+        rfc_label, test_row["filename"], test_content, candidates, get_active_profile(), artefact_context
     )
 
     conn = get_conn()
@@ -407,21 +445,6 @@ KEYWORDS = ["MUST NOT", "SHOULD NOT", "SHALL NOT", "MUST", "REQUIRED", "SHALL",
             "SHOULD", "RECOMMENDED", "MAY", "OPTIONAL"]
 KEYWORD_RE = re.compile(r'\b(' + '|'.join(k.replace(' ', r'\s+') for k in KEYWORDS) + r')\b')
 
-CATEGORY_RULES = [
-    ("fsm_state", [r'\bFSM\b', r'\bstate machine\b', r'\bIdle\b', r'\bConnect\b', r'\bActive\b',
-                   r'\bOpenSent\b', r'\bOpenConfirm\b', r'\bEstablished\b', r'transition']),
-    ("timer", [r'\btimer\b', r'\bHold Timer\b', r'\bKeepAlive\b', r'\bConnectRetry\b', r'\bexpir']),
-    ("message_format", [r'Message Format', r'\bheader\b', r'\bencod', r'\boctet', r'\bfield\b']),
-    ("path_attribute", [r'\bpath attribute\b', r'ORIGIN', r'AS_PATH', r'NEXT_HOP',
-                         r'MULTI_EXIT_DISC', r'LOCAL_PREF', r'AGGREGATOR', r'ATOMIC_AGGREGATE']),
-    ("error_handling", [r'Error Handling', r'\bNOTIFICATION\b', r'\berror\b', r'\bCease\b']),
-    ("capability_negotiation", [r'\bVersion Negotiation\b', r'\bcapabilit', r'\bOPEN Message\b']),
-    ("decision_process", [r'Decision Process', r'Route Selection', r'Degree of Preference',
-                           r'Route Dissemination', r'Route Resolvability']),
-    ("update_handling", [r'UPDATE Message', r'route advertise', r'withdraw', r'Update-Send']),
-    ("connection_management", [r'Connection Collision', r'TCP Connection', r'peer']),
-]
-
 NOT_OBSERVABLE_HINTS = [
     r'implementation[- ]dependent', r'local matter', r'internal to', r'MAY choose to store',
     r'is a matter of local', r'not required to advertise this attribute',
@@ -458,9 +481,13 @@ def _split_sections(lines):
     return sections
 
 
-def _classify_category(section_title, statement_text):
+def _classify_category(section_title, statement_text, profile):
+    """Profile-specific rules are tried first (e.g. BGP's path_attribute
+    patterns), then the rules common to every protocol (timer,
+    message_format, error_handling, capability_negotiation) -- see
+    protocol_profiles.py. Falls back to general_conformance."""
     hay = f"{section_title} {statement_text}"
-    for category, patterns in CATEGORY_RULES:
+    for category, patterns in list(profile.category_rules) + protocol_profiles.COMMON_CATEGORY_RULES:
         for p in patterns:
             if re.search(p, hay, re.IGNORECASE):
                 return category
@@ -485,10 +512,20 @@ def _split_into_statements(body_text):
     return statements
 
 
-def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str):
+def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str, protocol_override: str = ""):
     """Full re-ingestion: parse -> extract -> persist -> rebuild retrieval index.
     This is the ONLY function that reads raw RFC text. Everything else in this
-    module reads from the database."""
+    module reads from the database.
+
+    protocol_override lets the caller force a specific protocol_profiles key
+    instead of auto-detecting from rfc_number/rfc_title -- for an RFC the
+    built-in table doesn't recognize (see protocol_profiles.resolve_profile).
+    An unrecognized override falls back to auto-detection rather than
+    silently no-op'ing."""
+    profile = protocol_profiles.get_profile(protocol_override) if protocol_override else None
+    if profile is None or (protocol_override and profile.key != protocol_override):
+        profile = protocol_profiles.resolve_profile(rfc_number, rfc_title)
+
     lines = _clean_lines(raw_text)
     sections = _split_sections(lines)
 
@@ -507,7 +544,7 @@ def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str
             requirements.append({
                 "requirement_id": req_id, "rfc": f"RFC{rfc_number}", "section_id": sid,
                 "section_title": sec["title"], "keyword": keyword, "statement": stmt,
-                "category": _classify_category(sec["title"], stmt),
+                "category": _classify_category(sec["title"], stmt, profile),
                 "testability": _classify_testability(stmt),
             })
 
@@ -524,12 +561,23 @@ def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str
         )
         conn.execute("INSERT INTO requirement_status (requirement_id) VALUES (?)", (r["requirement_id"],))
     conn.execute(
-        "INSERT INTO rfc_meta (id, rfc_number, rfc_title, source, ingested_at) VALUES (1,?,?,?,?)",
-        (rfc_number, rfc_title, source_label, datetime.datetime.now().isoformat(timespec="seconds")),
+        "INSERT INTO rfc_meta (id, rfc_number, rfc_title, source, ingested_at, protocol_key) VALUES (1,?,?,?,?,?)",
+        (rfc_number, rfc_title, source_label, datetime.datetime.now().isoformat(timespec="seconds"), profile.key),
     )
-    _log(conn, f"RFC_INGESTED (RFC {rfc_number}, {len(requirements)} requirements extracted)", source_label)
+    _log(conn, f"RFC_INGESTED (RFC {rfc_number}, {len(requirements)} requirements extracted, "
+               f"protocol={profile.key})", source_label)
     conn.commit()
     conn.close()
+
+
+def get_active_profile():
+    """The protocol_profiles.ProtocolProfile for whatever RFC is currently
+    ingested. Falls back to the generic profile if nothing's ingested yet
+    or the stored key isn't recognized -- never raises."""
+    conn = get_conn()
+    row = conn.execute("SELECT protocol_key FROM rfc_meta WHERE id=1").fetchone()
+    conn.close()
+    return protocol_profiles.get_profile(row["protocol_key"] if row else "")
 
     # Clear old generated test files (fresh RFC = fresh test package)
     for f in list(DOCS_DIR.glob("*.md")) + list(PYTEST_DIR.glob("*.py")):
@@ -602,8 +650,8 @@ DOC_TEMPLATE = """# {test_id}
 
 ## Preconditions
 
-- **Topology:** {topology} (R1 AS 65001 ↔ R2 AS 65002){topology_note}
-- **Timers:** Hold = {hold}s, KeepAlive = {keepalive}s, ConnectRetry = {connect_retry}s
+- **Topology:** {topology} ({topology_description}){topology_note}
+- **Timers:** {timers_line}
 - **Devices:** Juniper vJunos-router / vMX pair reachable via NETCONF (PyEZ)
 {emulator_note}
 
@@ -678,17 +726,7 @@ def test_{test_id}(r1, r2):
     with Config(r1, mode="exclusive") as cu:
         cu.load(
             \'\'\'
-            protocols {{
-                bgp {{
-                    group EBGP-PEER {{
-                        type external;
-                        peer-as 65002;
-                        neighbor R2_LAB_IP {{
-                            hold-time {hold};
-                        }}
-                    }}
-                }}
-            }}
+{config_stanza}
             \'\'\',
             format="text",
         )
@@ -699,12 +737,12 @@ def test_{test_id}(r1, r2):
 
     # --- observation ---
     # PyEZ observation point (AI-suggested): {pyez_observation}
-    bgp_info = r1.rpc.get_bgp_neighbor_information()
-    peer_state = bgp_info.findtext(".//peer-state")
+    _info = r1.{observation_call}
+    {result_var} = _info.findtext("{observation_field}")
 
     # --- assertion ---
     # Expected: {assertion_hint}
-    assert peer_state is not None, "Could not read BGP peer state via PyEZ RPC"
+    assert {result_var} is not None, "Could not read {result_var} via PyEZ RPC"
 {assertion_block}
 '''
 
@@ -740,35 +778,22 @@ def infer_test_type(category: str, keyword: str) -> str:
     return "positive"
 
 
-def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_from: str = ""):
-    """The single generation entry point. For each requirement, retrieves a
-    small context pack (the requirement itself + semantically related ones
-    from the SAME persisted knowledge base -- never raw RFC text), asks the
-    AI reasoning step for a Test Intent, validates it, and renders doc +
-    pytest through the deterministic templates. Falls back to a heuristic
-    Test Intent if no API key is configured or the AI call/response fails
-    validation -- generation always succeeds, just with lower confidence."""
-    conn = get_conn()
-    batch_row = conn.execute("SELECT COALESCE(MAX(batch_id),0)+1 AS b FROM test_intents").fetchone()
-    batch_id = batch_row["b"]
+def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived_from: str, profile) -> dict:
+    """The AI-call + template-render work for a single requirement, with no
+    DB writes and no file writes -- safe to run concurrently across a thread
+    pool (see generate_tests). Returns a fully-populated record ready for
+    the caller to persist. Never raises: any unexpected failure here falls
+    back to the same heuristic path AI failures already use, so one bad
+    record can't sink a whole bulk-generation batch.
 
-    rfc_row = conn.execute("SELECT rfc_number, rfc_title FROM rfc_meta WHERE id=1").fetchone()
-    rfc_label = f"RFC {rfc_row['rfc_number']} ({rfc_row['rfc_title']})" if rfc_row else "RFC"
-    artefact_context = get_artefact_context()
-
-    created = []
-    skipped = []
-    for rid in requirement_ids:
-        row = conn.execute("SELECT * FROM requirements WHERE requirement_id=?", (rid,)).fetchone()
-        if not row:
-            skipped.append(rid)
-            continue
-        status = conn.execute("SELECT * FROM requirement_status WHERE requirement_id=?", (rid,)).fetchone()
-        if status and status["has_generated_test"]:
-            skipped.append(rid)
-            continue
-
-        req_dict = dict(row)
+    `profile` (a protocol_profiles.ProtocolProfile) supplies every
+    protocol-specific default that used to be hardcoded to BGP: topology
+    description, timer fields, the Junos config stanza, and the PyEZ
+    observation call actually executed by the rendered pytest stub -- the
+    AI's own pyez_observation suggestion stays advisory documentation only,
+    never the literal executed call, same safety boundary as assertion_code."""
+    rid = req_dict["requirement_id"]
+    try:
         category = req_dict["category"]
         keyword = req_dict["keyword"]
 
@@ -776,7 +801,7 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
         # persisted knowledge base (hybrid retriever, semantic side).
         related = [r for r in semantic_search(req_dict["statement"], k=4) if r["requirement_id"] != rid][:3]
 
-        ai_intent, mode = ai_generation.generate_ai_test_intent(rfc_label, req_dict, related, artefact_context)
+        ai_intent, mode = ai_generation.generate_ai_test_intent(rfc_label, req_dict, related, profile, artefact_context)
         ai_backend = ai_generation.get_active_backend_key() if ai_intent else ""
 
         if ai_intent:
@@ -801,9 +826,9 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
             protocol_reasoning = "(heuristic fallback -- AI reasoning unavailable for this test; see notes)"
             steps = STEPS_BY_TYPE[test_type]
             assertion_hint = ASSERTION_BY_TYPE[test_type]
-            pyez_observation = "rpc.get_bgp_neighbor_information() -> .//peer-state"
+            pyez_observation = profile.observation_hint()
             requires_emulator = test_type in ("negative", "boundary")
-            emulator_tool = "ExaBGP/Scapy" if requires_emulator else "none"
+            emulator_tool = profile.default_emulator_tool if requires_emulator else "none"
             topology_note = ""
             notes = mode  # e.g. "heuristic-fallback:no-api-key"
             confidence = "n/a"
@@ -813,7 +838,7 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
 
         test_id = rid.lower().replace("-", "_").replace(".", "_")
         priority = "high" if risk == "high" else "medium"
-        timers = {"hold": 6 if category == "timer" else 90, "keepalive": 30, "connect_retry": 120}
+        timers = profile.timers_for(category)
 
         reuse_note = f"- **Derived from:** {derived_from} (topology/timer fixture reused)" if derived_from else ""
         emulator_note = (f"- **Requires peer emulator: {emulator_tool}** — Junos will not originate this "
@@ -826,8 +851,8 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
             test_id=test_id, rid=rid, rfc=rfc_label, section_id=req_dict["section_id"],
             section_title=req_dict["section_title"], test_type=test_type, category=category,
             risk=risk, priority=priority, generation_mode=mode, review_flag=review_flag,
-            topology="two-router-ebgp", topology_note=topology_note_fmt,
-            hold=timers["hold"], keepalive=timers["keepalive"], connect_retry=timers["connect_retry"],
+            topology=profile.topology_key, topology_description=profile.topology_description,
+            topology_note=topology_note_fmt, timers_line=profile.timers_line(timers),
             steps="\n".join(f"{i+1}. {s}" for i, s in enumerate(steps)),
             assertion_hint=assertion_hint, pyez_observation=pyez_observation,
             emulator_note=emulator_note, keyword=keyword, statement=req_dict["statement"],
@@ -844,7 +869,8 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
                                 f'    # assert {assertion_code}\n'
                                 f'    # TODO: replace with the precise assertion for this requirement')
         else:
-            assertion_block = '    # TODO: replace with the precise assertion for this requirement\n    # assert peer_state.strip() == "Established"'
+            assertion_block = (f'    # TODO: replace with the precise assertion for this requirement\n'
+                                f'    # assert {profile.result_var} == "<expected value for this protocol/requirement>"')
 
         stimulus_block = (
             f"    # NOTE: requires a peer emulator ({emulator_tool}) to construct this stimulus --\n"
@@ -852,35 +878,121 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
             f"    # TODO: send the crafted stimulus via {emulator_tool} here."
         ) if requires_emulator else "    # (positive-path stimulus -- standard peering brings this up naturally)"
 
+        config_stanza = Template(profile.config_template).substitute(**timers)
+
         pytest_content = PYTEST_TEMPLATE.format(
             rid=rid, rfc=rfc_label, section_id=req_dict["section_id"], section_title=req_dict["section_title"],
             keyword=keyword, statement=req_dict["statement"].replace('"""', "'"), test_type=test_type,
-            risk=risk, test_id=test_id, hold=timers["hold"], generation_mode=mode,
+            risk=risk, test_id=test_id, generation_mode=mode,
             protocol_reasoning=protocol_reasoning.replace('"""', "'"),
             emulator_warning=emulator_warning, pyez_observation=pyez_observation,
+            config_stanza=config_stanza, observation_call=profile.observation_call,
+            observation_field=profile.observation_field, result_var=profile.result_var,
             assertion_hint=assertion_hint, stimulus_block=stimulus_block, assertion_block=assertion_block,
         )
 
-        (DOCS_DIR / f"{test_id}.md").write_text(doc_content, encoding="utf-8")
-        (PYTEST_DIR / f"test_{test_id}.py").write_text(pytest_content, encoding="utf-8")
+        return {
+            "rid": rid, "test_id": test_id, "category": category, "test_type": test_type, "risk": risk,
+            "priority": priority, "section_id": req_dict["section_id"], "section_title": req_dict["section_title"],
+            "statement": req_dict["statement"], "keyword": keyword, "timers": timers,
+            "doc_content": doc_content, "pytest_content": pytest_content, "mode": mode, "ai_backend": ai_backend,
+            "protocol_reasoning": protocol_reasoning, "requires_emulator": requires_emulator,
+            "emulator_tool": emulator_tool, "needs_review": needs_review,
+        }
+    except Exception as e:
+        logger.warning(f"_generate_one crashed unexpectedly for {rid}, falling back to a minimal stub: {e}")
+        test_id = rid.lower().replace("-", "_").replace(".", "_")
+        fallback_notes = f"heuristic-fallback:unexpected-error:{e}"
+        doc_content = (f"# {test_id}\n\nGeneration failed unexpectedly for {rid}: {e}\n\n"
+                        f"Statement: {req_dict.get('statement', '')}\n")
+        pytest_content = (f'"""Generation failed unexpectedly for {rid}: {e}"""\n'
+                           f"import pytest\n\n\ndef test_{test_id}():\n"
+                           f"    pytest.skip(\"generation failed -- see doc for details\")\n")
+        return {
+            "rid": rid, "test_id": test_id, "category": req_dict.get("category", "general_conformance"),
+            "test_type": "positive", "risk": "medium", "priority": "medium",
+            "section_id": req_dict.get("section_id", ""), "section_title": req_dict.get("section_title", ""),
+            "statement": req_dict.get("statement", ""), "keyword": req_dict.get("keyword", ""),
+            "timers": profile.timers_for(req_dict.get("category", "general_conformance")),
+            "doc_content": doc_content, "pytest_content": pytest_content, "mode": fallback_notes, "ai_backend": "",
+            "protocol_reasoning": "", "requires_emulator": False, "emulator_tool": "none", "needs_review": 1,
+        }
 
-        conn.execute(
-            """INSERT OR REPLACE INTO test_intents
-               (test_id, requirement_id, category, test_type, risk, priority, section_id, section_title,
-                statement, keyword, topology, timers, doc_content, pytest_content, derived_from, batch_id,
-                created_at, generation_mode, ai_backend, protocol_reasoning, requires_peer_emulator,
-                emulator_tool, needs_review)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (test_id, rid, category, test_type, risk, priority, req_dict["section_id"], req_dict["section_title"],
-             req_dict["statement"], keyword, "two-router-ebgp", json.dumps(timers), doc_content, pytest_content,
-             derived_from, batch_id, datetime.datetime.now().isoformat(timespec="seconds"), mode, ai_backend,
-             protocol_reasoning, int(requires_emulator), emulator_tool, needs_review),
-        )
-        conn.execute(
-            "UPDATE requirement_status SET has_generated_test=1, test_id=? WHERE requirement_id=?",
-            (test_id, rid),
-        )
-        created.append(test_id)
+
+def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_from: str = ""):
+    """The single generation entry point. For each requirement, retrieves a
+    small context pack (the requirement itself + semantically related ones
+    from the SAME persisted knowledge base -- never raw RFC text), asks the
+    AI reasoning step for a Test Intent, validates it, and renders doc +
+    pytest through the deterministic templates. Falls back to a heuristic
+    Test Intent if no AI backend is available or the AI call/response fails
+    validation -- generation always succeeds, just with lower confidence.
+
+    The AI-call/render step for each requirement (_generate_one) touches no
+    shared state, so it runs concurrently across GENERATION_CONCURRENCY
+    threads -- the only thing that matters for a bulk batch of 100+
+    requirements is wall-clock time, and each call is I/O-bound (subprocess
+    or network), not CPU-bound. All DB writes and file writes happen
+    afterward, sequentially, on the single connection below."""
+    conn = get_conn()
+    batch_row = conn.execute("SELECT COALESCE(MAX(batch_id),0)+1 AS b FROM test_intents").fetchone()
+    batch_id = batch_row["b"]
+
+    rfc_row = conn.execute("SELECT rfc_number, rfc_title FROM rfc_meta WHERE id=1").fetchone()
+    rfc_label = f"RFC {rfc_row['rfc_number']} ({rfc_row['rfc_title']})" if rfc_row else "RFC"
+    artefact_context = get_artefact_context()
+    profile = get_active_profile()
+
+    skipped = []
+    to_process = []
+    for rid in requirement_ids:
+        row = conn.execute("SELECT * FROM requirements WHERE requirement_id=?", (rid,)).fetchone()
+        if not row:
+            skipped.append(rid)
+            continue
+        status = conn.execute("SELECT * FROM requirement_status WHERE requirement_id=?", (rid,)).fetchone()
+        if status and status["has_generated_test"]:
+            skipped.append(rid)
+            continue
+        to_process.append(dict(row))
+
+    created = []
+    if to_process:
+        with ThreadPoolExecutor(max_workers=min(GENERATION_CONCURRENCY, len(to_process))) as pool:
+            futures = [pool.submit(_generate_one, req_dict, rfc_label, artefact_context, derived_from, profile)
+                       for req_dict in to_process]
+            records = {r["rid"]: r for r in (f.result() for f in as_completed(futures))}
+
+        # Write in the caller's original order, not completion order -- keeps
+        # batch listings/logs deterministic regardless of thread timing.
+        for req_dict in to_process:
+            rec = records.get(req_dict["requirement_id"])
+            if rec is None:
+                skipped.append(req_dict["requirement_id"])
+                continue
+
+            (DOCS_DIR / f"{rec['test_id']}.md").write_text(rec["doc_content"], encoding="utf-8")
+            (PYTEST_DIR / f"test_{rec['test_id']}.py").write_text(rec["pytest_content"], encoding="utf-8")
+
+            conn.execute(
+                """INSERT OR REPLACE INTO test_intents
+                   (test_id, requirement_id, category, test_type, risk, priority, section_id, section_title,
+                    statement, keyword, topology, timers, doc_content, pytest_content, derived_from, batch_id,
+                    created_at, generation_mode, ai_backend, protocol_reasoning, requires_peer_emulator,
+                    emulator_tool, needs_review)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (rec["test_id"], rec["rid"], rec["category"], rec["test_type"], rec["risk"], rec["priority"],
+                 rec["section_id"], rec["section_title"], rec["statement"], rec["keyword"], profile.topology_key,
+                 json.dumps(rec["timers"]), rec["doc_content"], rec["pytest_content"], derived_from, batch_id,
+                 datetime.datetime.now().isoformat(timespec="seconds"), rec["mode"], rec["ai_backend"],
+                 rec["protocol_reasoning"], int(rec["requires_emulator"]), rec["emulator_tool"],
+                 rec["needs_review"]),
+            )
+            conn.execute(
+                "UPDATE requirement_status SET has_generated_test=1, test_id=? WHERE requirement_id=?",
+                (rec["test_id"], rec["rid"]),
+            )
+            created.append(rec["test_id"])
 
     active_backend = ai_generation.get_active_backend_key()
     ai_mode_note = f"AI reasoning via {active_backend}" if active_backend else "heuristic templates (no AI backend available)"
@@ -909,6 +1021,12 @@ RECOMMENDATIONS = {
     "update_handling": "Needs UPDATE messages with attributes deliberately out of order -- requires Scapy/ExaBGP construction.",
     "connection_management": "Requires deliberately triggering TCP collision -- needs scripted dual-connect, not just standard peering.",
     "general_conformance": "Broad conformance statements; typically covered indirectly by other category tests.",
+    # OSPF-specific categories (see protocol_profiles.OSPF_PROFILE).
+    "neighbor_adjacency": "Requires a peer emulator capable of driving down/malformed Hello packets that a conformant Junos peer won't generate on its own.",
+    "lsa_flooding": "Needs a peer emulator (Scapy) to inject LSAs with specific sequence numbers/ages/checksums outside normal flooding.",
+    "spf_calculation": "Requires a multi-router topology with controlled link costs to verify SPF tie-breaking and route installation.",
+    "area_management": "Requires a multi-area topology (ABR/virtual link) to exercise area-boundary behavior.",
+    "authentication": "Needs a peer emulator capable of sending mismatched/absent authentication to verify rejection.",
 }
 
 
@@ -1012,7 +1130,30 @@ def get_rfc_meta():
     conn = get_conn()
     row = conn.execute("SELECT * FROM rfc_meta WHERE id=1").fetchone()
     conn.close()
-    return dict(row) if row else None
+    if not row:
+        return None
+    meta = dict(row)
+    meta["protocol_display_name"] = protocol_profiles.get_profile(meta.get("protocol_key", "")).display_name
+    return meta
+
+
+def generate_all_gaps(batch_label: str = "bulk-fill-all-gaps", limit: int = None):
+    """Bulk-fill: generate tests for every remaining automatable gap (the
+    same set the Gap Analysis tab shows), instead of the 3-per-category demo
+    seed or 5-at-a-time per-category buttons. This is what actually moves
+    the out-of-the-box coverage number -- the seed package only exists so
+    the dashboard isn't empty on first launch; this is the "make coverage
+    real" action. `limit` caps how many gaps to fill in one call (useful to
+    avoid a single very long-running request); omit for all of them."""
+    cov = get_coverage()
+    gap_ids = [g["requirement_id"] for g in cov["gaps_after_existing_tests"]]
+    if limit is not None:
+        gap_ids = gap_ids[:limit]
+    if not gap_ids:
+        return {"batch_id": None, "created": [], "skipped_already_covered": [], "gap_count_before": 0}
+    result = generate_tests(gap_ids, batch_label=batch_label)
+    result["gap_count_before"] = len(gap_ids)
+    return result
 
 
 def get_ai_status():

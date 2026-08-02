@@ -138,44 +138,111 @@ re-renders every panel. Chart.js for the two Overview charts (category
 stacked bar, test-type donut), `marked` + `DOMPurify` to render a generated
 test's Markdown doc in the detail modal.
 
-## Where BGP is hard-coded (relevant to "protocol agnostic" work)
+## Protocol-agnostic architecture (`protocol_profiles.py`)
 
-These are the concrete coupling points — anything doing protocol-agnostic
-work has to touch all of them, not just the obvious one:
+The 6 BGP-coupling points originally identified here (category rules, the
+two templates, the heuristic-fallback observation/emulator defaults, the AI
+system prompt, and header copy) have all been resolved via a
+`ProtocolProfile` abstraction:
 
-1. **`pipeline.CATEGORY_RULES`** (pipeline.py:399) — regex categories are BGP
-   vocabulary: `FSM`, `OpenSent`/`OpenConfirm`, path-attribute names
-   (`ORIGIN`, `AS_PATH`, `NEXT_HOP`...), "UPDATE Message", etc. A different
-   protocol's RFC (OSPF, IS-IS) would mostly fall into `general_conformance`.
-2. **`pipeline.DOC_TEMPLATE` / `PYTEST_TEMPLATE`** (pipeline.py:573-698) —
-   hard-codes "two-router-ebgp" topology, `AS 65001 ↔ AS 65002`, and a PyEZ
-   config stanza that's literally `protocols { bgp { group EBGP-PEER ... } }`.
-   Every generated test gets this regardless of what's actually being tested.
-3. **`pipeline.generate_tests`'s default PyEZ observation/stimulus** — the
-   heuristic fallback path hardcodes
-   `rpc.get_bgp_neighbor_information() -> .//peer-state` and a BGP `bgp_info`
-   RPC call in `PYTEST_TEMPLATE`'s body, independent of the AI path.
-4. **`ai_generation.SYSTEM_PROMPT`** (ai_generation.py:68) — explicitly
-   frames the model as a "BGP/OSPF/IS-IS/... test architect" but then anchors
-   every example and default topology on BGP/eBGP AS numbers; there's no
-   protocol parameter threaded through the prompt.
-5. **`ingest_rfc`'s requirement id format** (`RFC{n}-S{section}-REQ-{nn}`) is
-   protocol-neutral already — this one's fine as-is.
-6. **Frontend copy** — header/subhead text in `index.html`/`app.js`
-   (`renderHeader`) says "BGP proof of concept" regardless of what RFC is
-   actually loaded; would mislead once a non-BGP RFC is ingested.
+- **`protocol_profiles.py`** defines one `ProtocolProfile` per protocol:
+  `category_rules` (tried before `COMMON_CATEGORY_RULES` — timer/
+  message_format/error_handling/capability_negotiation, shared by every
+  profile), `topology_key`/`topology_description`, `timer_fields` + a
+  per-category override (e.g. BGP shortens `hold` for timer-category tests),
+  a `config_template` (Junos config text, rendered via `string.Template`
+  — see the note below on why not `str.format()`), `observation_call`/
+  `observation_field`/`result_var` (the RPC the rendered pytest stub
+  actually executes), `default_emulator_tool`, and `expertise_note` (feeds
+  the AI system prompt). `bgp` is extracted verbatim from the original
+  hardcoded values; `ospf` (RFC 2328) is the second profile; `generic` is
+  the fallback for anything unrecognized.
+- **`protocol_profiles.resolve_profile(rfc_number, rfc_title)`** — RFC-number
+  match first, then a title-keyword scan, then generic. Called by
+  `ingest_rfc()`, which stores the result on `rfc_meta.protocol_key`.
+  `pipeline.get_active_profile()` reads it back (falling back to generic if
+  unset/unrecognized) for every read/generate path.
+- **`pipeline._generate_one`** takes the active profile and uses it for
+  every template field that used to be a literal BGP string. **Important
+  safety-boundary detail:** the AI's own `pyez_observation` suggestion stays
+  advisory documentation only (shown in a comment) — the RPC call the
+  rendered pytest stub actually executes always comes from the trusted
+  profile, never from AI output. Same pattern as `assertion_code`'s
+  AST-safety-checked promotion.
+- **`ai_generation.SYSTEM_PROMPT_TEMPLATE` / `COVERAGE_SYSTEM_PROMPT_TEMPLATE`**
+  take the profile's topology/expertise/emulator-tool details. Verified
+  this isn't just label-deep: prompted with the OSPF profile, the model's
+  `protocol_reasoning` for a real OSPF requirement referenced Type-1
+  router-LSAs, Router-IDs, and the LSDB specifically.
+- **Why `string.Template` (`$name`), not `str.format()`, for config stanzas
+  and system prompts:** Junos config text and the JSON schema examples in
+  the system prompt are both dense with literal `{`/`}` characters that
+  collide with `str.format()`'s field-delimiter syntax (confirmed this
+  breaks with a direct repro before picking the fix) — `Template` only
+  cares about `$`, so the literal braces need no escaping.
+- **Frontend**: `renderHeader()` reads `meta.protocol_display_name` from
+  `/api/status` instead of a hardcoded "BGP proof of concept" string; the
+  ingest form has an optional protocol-override select.
 
-## Where the "increase test coverage" ask actually bites
+A migration bug is worth remembering for future schema changes: adding
+`rfc_meta.protocol_key` required both an `ALTER TABLE` (DDL) and a backfill
+`UPDATE` (DML) in `_migrate()`. `get_conn()` never commits, and several
+read-only call sites only `SELECT` + close — so the backfill silently rolled
+back the first time, and because the column already existed, the `if column
+not in cols` guard meant it would never retry. Fixed by having `_migrate()`
+commit its own changes before returning. Any future migration that both
+alters schema *and* backfills data needs to do the same — don't rely on the
+caller to commit.
 
-Not a code defect — the machinery to generate more tests already exists
-(`/api/generate-by-category`, matrix drill-down "generate"). The gap is
-demo/default state: as of this writing the bundled RFC 4271 ingest extracts
-**203 requirements** (196 automatable) but the bootstrap seed only generates
-**28 tests** (3 per category, for the demo), i.e. ~14% overall coverage /
-~14% automatable coverage out of the box. "Increase coverage" is really
-"generate (and validate) a much larger share of the 196 automatable
-requirements," which is bounded by AI call volume/cost/time, not by any
-missing capability.
+## A confirmed extraction-recall gap (under-segmentation, not loss)
+
+Audited during the coverage-expansion work (see `todo.md` item 2): a naive
+whole-document keyword-sentence recount (bypassing section boundaries)
+matched the DB's extracted count exactly for RFC 4271 (203=203), so section
+splitting isn't dropping text at section edges. But `_split_into_statements`
+(pipeline.py) only splits on `". " + capital letter`, so RFC-style lettered/
+numbered sub-lists under one lead-in sentence get merged into a single
+oversized "requirement" instead of the several independently-testable
+statements they contain — e.g. §5.1.2's AS_PATH modification rules (a
+`SHALL NOT` for internal peers, plus several distinct external-peer
+`SHOULD`/conditional rules enumerated as `a)`/`b)`/`1)`/`2)`/`3)`) all
+collapse into one `requirements` row. Nothing is silently missing, but true
+requirement count is undercounted and some extracted statements are harder
+to test precisely than they should be. Not fixed yet — see `todo.md` for
+why (fixing the splitter and re-ingesting would renumber every requirement
+ID and orphan already-generated tests, since `ingest_rfc()` wipes
+`test_intents` on every re-ingest).
+
+## Bulk generation and coverage (resolved — see `todo.md` item 2)
+
+Wasn't a code defect — the machinery to generate more tests already existed
+(`/api/generate-by-category`, matrix drill-down "generate"); the gap was
+demo/default state (28 tests, ~14% coverage out of the box) and the fact
+that `generate_tests`'s per-requirement loop was fully sequential, making a
+196-requirement bulk run impractically slow.
+
+- **`pipeline.generate_all_gaps()` / `POST /api/generate-all`** — bulk-fills
+  every remaining automatable gap (optionally capped via `{limit}`) in one
+  call; a "Generate all remaining gaps" button in the Gap Analysis tab
+  drives it from the UI.
+- **Concurrency**: `generate_tests` splits into two phases —
+  `_generate_one` (the AI-call + template-render step, touches no shared
+  state) runs across a `ThreadPoolExecutor` (`AI_GENERATION_CONCURRENCY` env
+  var, default 4); all DB writes and file writes happen afterward,
+  sequentially, on the single connection. Real 40-item batch: ~5.3 minutes
+  wall time via the CLI backend, all 40 succeeded.
+- **Concurrency bug found and fixed**: `ai_generation._select_backend()`'s
+  memoization wasn't thread-safe — see the "AI integration" section above.
+- **Generation-quality panel** (Overview tab, `app.js:renderGenQuality`,
+  computed client-side from the catalog): total/high-confidence/needs-review/
+  emulator-required/heuristic-fallback counts, so bulk volume is visibly
+  checked against confidence, not just a bigger headline number.
+- **`backend/verify_generated_tests.py`** — `ast.parse`s every generated
+  pytest stub as a cheap post-generation smoke test.
+- Current state after this pass: **77 tests generated, 39.3% automatable
+  coverage** (up from 28 tests / ~14%), 119 gaps remaining — bulk-filling
+  the rest is a deliberate on-demand action before a demo, not part of
+  every fresh install's bootstrap (kept the existing fast-startup seed).
 
 ## Key management today
 

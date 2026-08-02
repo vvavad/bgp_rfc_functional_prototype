@@ -147,6 +147,18 @@ def api_generate_by_category():
     return jsonify(result)
 
 
+@app.post("/api/generate-all")
+def api_generate_all():
+    """Bulk-fill every remaining automatable gap in one call -- the action
+    that actually raises the out-of-the-box coverage number, as opposed to
+    the demo-scale seed package or the 5-at-a-time per-category buttons.
+    Optional {limit} caps how many gaps get filled in this call."""
+    body = request.get_json(force=True) or {}
+    limit = body.get("limit")
+    result = pipeline.generate_all_gaps(batch_label="bulk-fill-all-gaps", limit=int(limit) if limit else None)
+    return jsonify(result)
+
+
 @app.post("/api/ingest")
 def api_ingest():
     """Re-ingest a new RFC (pasted text). Replaces the current knowledge base
@@ -156,9 +168,11 @@ def api_ingest():
     rfc_number = body.get("rfc_number", "").strip()
     rfc_title = body.get("rfc_title", "").strip()
     raw_text = body.get("raw_text", "")
+    protocol = body.get("protocol", "").strip()
     if not rfc_number or not raw_text:
         return jsonify({"error": "rfc_number and raw_text are required"}), 400
-    result = pipeline.ingest_rfc(rfc_number, rfc_title or f"RFC {rfc_number}", raw_text, "user-pasted text (UI)")
+    result = pipeline.ingest_rfc(rfc_number, rfc_title or f"RFC {rfc_number}", raw_text, "user-pasted text (UI)",
+                                  protocol_override=protocol)
     return jsonify(result)
 
 
@@ -169,12 +183,14 @@ def api_ingest_upload():
     f = request.files.get("rfc_file")
     rfc_number = request.form.get("rfc_number", "").strip()
     rfc_title = request.form.get("rfc_title", "").strip()
+    protocol = request.form.get("protocol", "").strip()
     if not rfc_number or not f or not f.filename:
         return jsonify({"error": "rfc_number and rfc_file are required"}), 400
     text, note = pipeline.extract_text_from_file(f.filename, f.read())
     if not text:
         return jsonify({"error": f"could not extract text from {f.filename}: {note}"}), 400
-    result = pipeline.ingest_rfc(rfc_number, rfc_title or f"RFC {rfc_number}", text, f"uploaded file: {f.filename}")
+    result = pipeline.ingest_rfc(rfc_number, rfc_title or f"RFC {rfc_number}", text, f"uploaded file: {f.filename}",
+                                  protocol_override=protocol)
     return jsonify(result)
 
 

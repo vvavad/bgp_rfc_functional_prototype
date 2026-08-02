@@ -25,7 +25,9 @@ import re
 import ast
 import json
 import logging
+import threading
 from pathlib import Path
+from string import Template
 
 from dotenv import load_dotenv
 
@@ -53,17 +55,30 @@ AI_BACKEND_MODE = os.environ.get("AI_BACKEND", "auto").strip().lower()
 
 _backend = None
 _backend_checked = False
+_backend_lock = threading.Lock()
 
 
 def _select_backend():
-    """Lazy singleton. Returns None (and logs once) if no backend is
+    """Lazy singleton, resolved at most once even under concurrent callers
+    (pipeline.generate_tests fans out across a thread pool -- without the
+    lock, two threads racing the first call could both see
+    _backend_checked flip True before _backend is assigned and incorrectly
+    fall back to heuristic). Returns None (and logs once) if no backend is
     available under the configured AI_BACKEND_MODE -- callers must treat
     that as 'use the heuristic path'."""
     global _backend, _backend_checked
     if _backend_checked:
         return _backend
-    _backend_checked = True
+    with _backend_lock:
+        if _backend_checked:
+            return _backend
+        _backend_checked = True
+        _resolve_backend()
+    return _backend
 
+
+def _resolve_backend():
+    global _backend
     cli_backend = ai_backends.ClaudeCodeCLIBackend(model=AI_MODEL)
     api_backend = ai_backends.AnthropicAPIBackend(model=AI_MODEL)
 
@@ -101,9 +116,15 @@ def get_active_backend_key():
     return backend.key if backend else None
 
 
-SYSTEM_PROMPT = """You are a principal network protocol conformance test architect with deep, \
+# Templated (string.Template, $-style) rather than a plain f-string/`.format()`
+# target, deliberately -- the JSON schema block below is dense with literal
+# { } characters that would collide with str.format()'s field-delimiter
+# syntax (see pipeline.py's config_stanza rendering for the same issue hit
+# and fixed with the same approach).
+SYSTEM_PROMPT_TEMPLATE = Template("""You are a principal network protocol conformance test architect with deep, \
 current expertise in routing protocols (BGP, OSPF, IS-IS, MPLS, EVPN, segment routing), \
-Juniper Networks' Junos OS, PyEZ automation, YANG/NETCONF, and precise interpretation of IETF RFCs.
+Juniper Networks' Junos OS, PyEZ automation, YANG/NETCONF, and precise interpretation of IETF RFCs. \
+You are currently reasoning about $expertise_note.
 
 You are given ONE normative statement (a MUST/SHOULD/MAY-class requirement) extracted from an \
 RFC, plus a few semantically related requirements from the same RFC for context. You may also be \
@@ -115,17 +136,17 @@ protocol mechanics it describes.
 
 Think concretely about:
 - Whether the target device (a conformant Junos implementation) would ever exhibit the invalid/edge \
-  condition itself, or whether a scriptable peer/attacker (ExaBGP, Scapy, a raw TCP/BGP speaker) is \
+  condition itself, or whether a scriptable peer/attacker ($emulator_tool_examples) is \
   required to construct the stimulus. Be honest about this -- Junos will not originate malformed \
   messages on request.
 - What is externally, protocol-level observable (wire messages, NOTIFICATION codes, FSM state, \
   RIB/Adj-RIB contents, timers) versus purely internal/implementation-defined and therefore not \
   independently testable.
-- The minimum topology needed (default is two routers, eBGP, AS 65001 <-> AS 65002, Junos vJunos-router \
-  / vMX via PyEZ over NETCONF) -- only ask for more (e.g. a third router, an iBGP mesh, a route \
-  reflector) if the requirement genuinely needs it.
+- The minimum topology needed (default is $topology_description, Junos vJunos-router \
+  / vMX via PyEZ over NETCONF) -- only ask for more (e.g. a third router, a multi-area/mesh \
+  topology, a route reflector) if the requirement genuinely needs it.
 - The precise PyEZ/NETCONF observation point: which RPC or config/operational data would show the result \
-  (e.g. get_bgp_neighbor_information, get_route_information, a specific XML element).
+  (e.g. $observation_example, a specific XML element).
 
 Respond with ONLY a single JSON object, no prose, no markdown fences, matching exactly this schema:
 {
@@ -134,17 +155,37 @@ Respond with ONLY a single JSON object, no prose, no markdown fences, matching e
   "confidence": "high" | "medium" | "low",
   "protocol_reasoning": "2-3 sentences of the specific protocol mechanics behind this test, in your own words",
   "requires_peer_emulator": true | false,
-  "emulator_tool": "ExaBGP" | "Scapy" | "none",
-  "topology_note": "short note on topology if it differs from the two-router eBGP default, else empty string",
+  "emulator_tool": $emulator_tool_enum,
+  "topology_note": "short note on topology if it differs from the default, else empty string",
   "steps": ["specific step 1", "specific step 2", "specific step 3 (optional)"],
   "assertion_hint": "precise, specific description of the pass/fail condition",
-  "pyez_observation": "the specific PyEZ RPC call or XML field to inspect, e.g. rpc.get_bgp_neighbor_information() -> .//bgp-error-count",
+  "pyez_observation": "the specific PyEZ RPC call or XML field to inspect, e.g. $observation_example",
   "assertion_code": "a single Python boolean expression (no imports, no function calls beyond simple attribute/dict access) that could plausibly be used in an assert statement -- best effort, may be refined by a human reviewer",
   "notes": "any caveats, edge cases, or reasons for lower confidence"
 }
 
 Set confidence to "low" if the requirement is ambiguous, internally-scoped, or you are not sure \
-Junos exposes the needed observation point. Do not inflate confidence to seem more useful."""
+Junos exposes the needed observation point. Do not inflate confidence to seem more useful.""")
+
+
+def _build_system_prompt(profile) -> str:
+    """profile is a protocol_profiles.ProtocolProfile for the RFC currently
+    being reasoned about -- see pipeline.get_active_profile(). Keeps the
+    deep multi-protocol expertise framing (still genuinely true regardless
+    of which RFC is loaded) while making the topology/tooling defaults and
+    the emulator_tool enum reflect the active protocol instead of always
+    assuming BGP."""
+    tools = [] if profile.default_emulator_tool == "none" else profile.default_emulator_tool.split("/")
+    emulator_tool_enum = " | ".join(f'"{t}"' for t in tools + ["none"])
+    emulator_tool_examples = (", ".join(tools) + ", a raw protocol-speaking peer") if tools else \
+        "a protocol-appropriate packet-crafting tool"
+    return SYSTEM_PROMPT_TEMPLATE.substitute(
+        expertise_note=profile.expertise_note,
+        emulator_tool_examples=emulator_tool_examples,
+        topology_description=profile.topology_description,
+        observation_example=profile.observation_hint(),
+        emulator_tool_enum=emulator_tool_enum,
+    )
 
 
 def _build_user_prompt(rfc_label, req_row, related, artefact_context=""):
@@ -227,17 +268,21 @@ def _safe_assertion_expr(code: str) -> bool:
     return True
 
 
-def generate_ai_test_intent(rfc_label: str, req_row: dict, related: list, artefact_context: str = ""):
+def generate_ai_test_intent(rfc_label: str, req_row: dict, related: list, profile, artefact_context: str = ""):
     """Returns (intent_dict, mode_str) where mode_str is one of
     'ai-high' / 'ai-medium' / 'ai-low' / 'heuristic-fallback:<reason>'.
-    artefact_context is optional grounding text built from uploaded product
-    specs / other reference material (see pipeline.get_artefact_context)."""
+    profile is a protocol_profiles.ProtocolProfile (see
+    pipeline.get_active_profile()) -- shapes the system prompt's topology/
+    tooling defaults instead of always assuming BGP. artefact_context is
+    optional grounding text built from uploaded product specs / other
+    reference material (see pipeline.get_artefact_context)."""
     backend = _select_backend()
     if backend is None:
         return None, "heuristic-fallback:no-ai-backend"
 
     try:
-        text = backend.complete(SYSTEM_PROMPT, _build_user_prompt(rfc_label, req_row, related, artefact_context),
+        text = backend.complete(_build_system_prompt(profile),
+                                 _build_user_prompt(rfc_label, req_row, related, artefact_context),
                                  max_tokens=1000)
         obj = json.loads(_strip_fences(text))
     except Exception as e:
@@ -261,8 +306,8 @@ def generate_ai_test_intent(rfc_label: str, req_row: dict, related: list, artefa
 # actually offered the model -- a hallucinated ID can't sneak in.
 # ------------------------------------------------------------------ #
 
-COVERAGE_SYSTEM_PROMPT = """You are a principal test architect auditing an EXISTING test suite for \
-conformance coverage against an IETF RFC, for a BGP implementation on Juniper Junos (vJunos-router / vMX).
+COVERAGE_SYSTEM_PROMPT_TEMPLATE = Template("""You are a principal test architect auditing an EXISTING test suite for \
+conformance coverage against an IETF RFC, for a $protocol_display_name implementation on Juniper Junos (vJunos-router / vMX).
 
 You are given the content of one existing/uploaded test artifact (this may be pytest/PyEZ source code, \
 a documented test case, an exported test-case description, or similar), plus a shortlist of candidate RFC \
@@ -272,8 +317,8 @@ from uploaded product specs for grounding on what the real target device support
 Your job: for each candidate requirement, decide whether this specific test ACTUALLY verifies it -- not \
 just mentions related terms. Look for real evidence: an assertion, an observation point (RPC call, wire \
 capture, log check), a specific stimulus that would exercise that exact behavior. A test that merely \
-brings up a BGP session does not, by itself, verify every requirement about that session -- only the ones \
-its assertions and checks concretely establish.
+brings up a protocol session/adjacency does not, by itself, verify every requirement about that session -- \
+only the ones its assertions and checks concretely establish.
 
 Be conservative: if the evidence is thin or ambiguous, either omit the requirement entirely or include it \
 with "low" confidence and say why in the rationale. Do not pad the list to look thorough.
@@ -288,7 +333,11 @@ Respond with ONLY a single JSON object, no prose, no markdown fences, matching e
 }
 
 Only include requirement IDs that were in the candidate list you were given. If none are genuinely
-covered, return {"covered": []}."""
+covered, return {"covered": []}.""")
+
+
+def _build_coverage_system_prompt(profile) -> str:
+    return COVERAGE_SYSTEM_PROMPT_TEMPLATE.substitute(protocol_display_name=profile.display_name)
 
 
 def _build_coverage_user_prompt(rfc_label, filename, test_content, candidates, artefact_context=""):
@@ -357,11 +406,12 @@ def _heuristic_coverage_match(test_content: str, candidates: list) -> list:
 
 
 def analyze_existing_test_coverage(rfc_label: str, filename: str, test_content: str, candidates: list,
-                                    artefact_context: str = ""):
+                                    profile, artefact_context: str = ""):
     """Returns (matches, mode_str). matches is a list of
     {requirement_id, confidence, rationale} dicts, restricted to the given
     candidates. mode_str mirrors generate_ai_test_intent's convention:
-    'ai-reviewed' or 'heuristic-fallback:<reason>'."""
+    'ai-reviewed' or 'heuristic-fallback:<reason>'. profile is a
+    protocol_profiles.ProtocolProfile (see pipeline.get_active_profile())."""
     if not candidates:
         return [], "skipped:no-candidates"
 
@@ -372,7 +422,7 @@ def analyze_existing_test_coverage(rfc_label: str, filename: str, test_content: 
 
     try:
         text = backend.complete(
-            COVERAGE_SYSTEM_PROMPT,
+            _build_coverage_system_prompt(profile),
             _build_coverage_user_prompt(rfc_label, filename, test_content, candidates, artefact_context),
             max_tokens=1500,
         )
