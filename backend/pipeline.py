@@ -569,6 +569,13 @@ def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str
     conn.commit()
     conn.close()
 
+    # Clear old generated test files (fresh RFC = fresh test package)
+    for f in list(DOCS_DIR.glob("*.md")) + list(PYTEST_DIR.glob("*.py")):
+        f.unlink()
+
+    _build_retrieval_index()
+    return {"requirement_count": len(requirements)}
+
 
 def get_active_profile():
     """The protocol_profiles.ProtocolProfile for whatever RFC is currently
@@ -578,13 +585,6 @@ def get_active_profile():
     row = conn.execute("SELECT protocol_key FROM rfc_meta WHERE id=1").fetchone()
     conn.close()
     return protocol_profiles.get_profile(row["protocol_key"] if row else "")
-
-    # Clear old generated test files (fresh RFC = fresh test package)
-    for f in list(DOCS_DIR.glob("*.md")) + list(PYTEST_DIR.glob("*.py")):
-        f.unlink()
-
-    _build_retrieval_index()
-    return {"requirement_count": len(requirements)}
 
 
 def _build_retrieval_index():

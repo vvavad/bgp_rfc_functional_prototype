@@ -260,3 +260,36 @@ walkthrough." Concrete gaps against that bar:
       agnosticism) — the feedback asks for a *BGP-focused* demo, so don't let
       the protocol-agnostic refactor block or delay demo prep; sequence it
       after, as noted at the top of this file.
+
+---
+
+## Demo validation (`demo_1.md`)
+
+Ran every step of `demo_1.md` end to end for real — backup, fresh-start
+bootstrap, live generation, restart-doesn't-reingest proof (including the
+optional "move the RFC file away" bonus), OSPF re-ingest, and restore —
+not just read for plausibility. One real, serious bug found and fixed:
+
+- [x] **`ingest_rfc()` was silently broken since the protocol-agnostic
+      refactor.** The edit that added `get_active_profile()` had inserted
+      it in the middle of `ingest_rfc()`'s body, splitting off the tail
+      (stale-file cleanup, retrieval-index rebuild, and the
+      `return {"requirement_count": ...}` the bootstrap depends on) as
+      dead code after `get_active_profile()`'s own `return`. No syntax
+      error, no exception at import time — it just crashed `app.py`'s
+      bootstrap on a fresh DB (`res['requirement_count']` on a `None`),
+      and would have silently left stale generated files behind and never
+      rebuilt the retrieval index on every other re-ingest. Only running
+      a real fresh-start boot surfaced it. Fixed by moving the tail back
+      to the end of `ingest_rfc()` (see `design.md`).
+- [x] Re-ran the full script after the fix: clean bootstrap (203
+      requirements, 28 seed tests across 10 categories, console output
+      matching the doc verbatim), live generation (doc + pytest content
+      verified), restart-without-reingest proof (including the RFC-file-
+      moved-away bonus), OSPF ingest (10 requirements, correct
+      OSPF-specific categories/topology/timers/config stanza/observation
+      call), and restore-to-exact-original-state (77 tests, 39.3%
+      automatable coverage, RFC 4271/BGP) — all confirmed working.
+- Everything else in `demo_1.md` matched the running app exactly as
+  written: console messages, AI badge/status fields, ingestion-log
+  wording, form field behavior, API responses. No other fixes needed.

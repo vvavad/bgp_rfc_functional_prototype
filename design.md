@@ -194,6 +194,25 @@ commit its own changes before returning. Any future migration that both
 alters schema *and* backfills data needs to do the same — don't rely on the
 caller to commit.
 
+A second, more serious bug from the same refactor was caught later, only by
+literally running `demo_1.md` end to end (see the demo-validation note in
+`todo.md`): the edit that added `get_active_profile()` inserted it in the
+middle of `ingest_rfc()`'s body, right after `conn.close()` — splitting off
+`ingest_rfc()`'s tail (deleting stale generated test files from the
+previous RFC, rebuilding the TF-IDF retrieval index, and the
+`return {"requirement_count": ...}` the bootstrap code depends on) as dead,
+unreachable code sitting after `get_active_profile()`'s own `return`. The
+function still parsed and ran without error — it just silently returned
+`None`, never rebuilt the retrieval index, and never cleared old generated
+files on re-ingest. This crashed the app's first-run bootstrap outright
+(`app.py` unpacks `res['requirement_count']`) and would have silently
+broken semantic-search grounding and left stale files behind on every
+other re-ingest. Caught and fixed by moving the tail back to the end of
+`ingest_rfc()`, where it belongs. Static checks (`ast.parse`, syntax
+validation) never catch this class of bug — only actually running the
+code path exposes it, which is exactly why `demo_1.md` got run for real
+rather than just read for plausibility.
+
 ## A confirmed extraction-recall gap (under-segmentation, not loss)
 
 Audited during the coverage-expansion work (see `todo.md` item 2): a naive
