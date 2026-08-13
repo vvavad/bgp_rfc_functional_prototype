@@ -148,6 +148,20 @@ Think concretely about:
 - The precise PyEZ/NETCONF observation point: which RPC or config/operational data would show the result \
   (e.g. $observation_example, a specific XML element).
 
+IMPORTANT -- what data is actually available when you write assertion_code:
+The generated test ALWAYS fetches one value for you automatically, before your assertion runs: \
+$observation_example, stored in a Python variable called `$result_var`. That is the ONLY variable \
+that exists unless you declare more. If the requirement needs to inspect something else \
+(e.g. AS_PATH content, a specific route attribute, an LSA field) -- something $result_var alone \
+can't show -- declare it in the "observations" array below instead of assuming a variable name \
+exists. Each entry names a NEW variable, picks where to get it from, and gives the XPath to extract:
+  - "source": "primary" pulls from the response already fetched for $result_var (a different field of the same RPC reply) -- no extra network call.
+  - "source": one of these additional trusted calls available for this protocol -- $secondary_menu -- issues that call once and extracts your XPath from its response.
+Declare at most 3 observations. assertion_code may ONLY reference `$result_var` and the variable \
+names you declare in "observations" -- nothing else. If you can't express the real check using \
+$result_var plus at most 3 declared observations, leave assertion_code as an empty string and \
+explain why in "notes" rather than inventing a variable that will never exist.
+
 Respond with ONLY a single JSON object, no prose, no markdown fences, matching exactly this schema:
 {
   "test_type": "positive" | "negative" | "boundary" | "policy" | "recovery",
@@ -160,7 +174,10 @@ Respond with ONLY a single JSON object, no prose, no markdown fences, matching e
   "steps": ["specific step 1", "specific step 2", "specific step 3 (optional)"],
   "assertion_hint": "precise, specific description of the pass/fail condition",
   "pyez_observation": "the specific PyEZ RPC call or XML field to inspect, e.g. $observation_example",
-  "assertion_code": "a single Python boolean expression (no imports, no function calls beyond simple attribute/dict access) that could plausibly be used in an assert statement -- best effort, may be refined by a human reviewer",
+  "observations": [
+    {"var_name": "snake_case_identifier", "source": "primary" or a key from the menu above, "xpath": "XPath string to extract with .findtext()"}
+  ],
+  "assertion_code": "a single Python boolean expression referencing ONLY $result_var and/or your declared observations[].var_name (no imports, no function calls beyond simple attribute/dict access) -- empty string if no such expression is possible",
   "notes": "any caveats, edge cases, or reasons for lower confidence"
 }
 
@@ -172,19 +189,25 @@ def _build_system_prompt(profile) -> str:
     """profile is a protocol_profiles.ProtocolProfile for the RFC currently
     being reasoned about -- see pipeline.get_active_profile(). Keeps the
     deep multi-protocol expertise framing (still genuinely true regardless
-    of which RFC is loaded) while making the topology/tooling defaults and
-    the emulator_tool enum reflect the active protocol instead of always
-    assuming BGP."""
+    of which RFC is loaded) while making the topology/tooling defaults, the
+    emulator_tool enum, and the available-variable/observations grounding
+    reflect the active protocol instead of always assuming BGP."""
     tools = [] if profile.default_emulator_tool == "none" else profile.default_emulator_tool.split("/")
     emulator_tool_enum = " | ".join(f'"{t}"' for t in tools + ["none"])
     emulator_tool_examples = (", ".join(tools) + ", a raw protocol-speaking peer") if tools else \
         "a protocol-appropriate packet-crafting tool"
+    if profile.secondary_observations:
+        secondary_menu = ", ".join(f'"{k}" ({v})' for k, v in profile.secondary_observations.items())
+    else:
+        secondary_menu = "(none available for this protocol -- only \"primary\" is valid)"
     return SYSTEM_PROMPT_TEMPLATE.substitute(
         expertise_note=profile.expertise_note,
         emulator_tool_examples=emulator_tool_examples,
         topology_description=profile.topology_description,
         observation_example=profile.observation_hint(),
         emulator_tool_enum=emulator_tool_enum,
+        result_var=profile.result_var,
+        secondary_menu=secondary_menu,
     )
 
 
@@ -223,8 +246,50 @@ REQUIRED_KEYS = {"test_type", "risk", "confidence", "protocol_reasoning", "requi
                  "emulator_tool", "topology_note", "steps", "assertion_hint", "pyez_observation",
                  "assertion_code", "notes"}
 
+# "observations" is deliberately NOT in REQUIRED_KEYS -- it's new and optional
+# so a response that omits it entirely (rather than sending an empty list)
+# still validates; _validate_and_filter_observations treats a missing/
+# malformed value as "no extra observations" rather than failing the intent.
+MAX_OBSERVATIONS = 3
+_VALID_IDENTIFIER_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
+_RESERVED_VAR_NAMES = {"_info", "r1", "r2", "cu", "dev", "pytest", "Device", "Config",
+                        "len", "str", "int", "None", "True", "False"}
+_ALLOWED_BUILTIN_NAMES = {"len", "str", "int"}
 
-def _validate_intent(obj: dict) -> bool:
+
+def _validate_and_filter_observations(observations_raw, profile) -> list:
+    """Keeps only well-formed observation declarations: a legal, non-reserved
+    Python identifier for var_name, a source that's either "primary" or one
+    of this protocol's secondary_observations keys, and a string xpath.
+    Silently drops anything malformed instead of failing the whole intent --
+    matches the existing "generation always succeeds" contract. Caps at
+    MAX_OBSERVATIONS and de-dupes var_name collisions (first one wins)."""
+    if not isinstance(observations_raw, list):
+        return []
+    valid_sources = {"primary"} | set(profile.secondary_observations.keys())
+    reserved = _RESERVED_VAR_NAMES | {profile.result_var}
+    seen_names = set()
+    out = []
+    for item in observations_raw:
+        if len(out) >= MAX_OBSERVATIONS:
+            break
+        if not isinstance(item, dict):
+            continue
+        var_name, source, xpath = item.get("var_name"), item.get("source"), item.get("xpath")
+        if not isinstance(var_name, str) or not _VALID_IDENTIFIER_RE.match(var_name):
+            continue
+        if var_name in reserved or var_name in seen_names:
+            continue
+        if source not in valid_sources:
+            continue
+        if not isinstance(xpath, str) or not xpath or len(xpath) > 300:
+            continue
+        seen_names.add(var_name)
+        out.append({"var_name": var_name, "source": source, "xpath": xpath})
+    return out
+
+
+def _validate_intent(obj: dict, profile) -> bool:
     if not REQUIRED_KEYS.issubset(obj.keys()):
         return False
     if obj["test_type"] not in ("positive", "negative", "boundary", "policy", "recovery"):
@@ -235,14 +300,23 @@ def _validate_intent(obj: dict) -> bool:
         return False
     if not isinstance(obj["steps"], list) or not obj["steps"]:
         return False
+    # Filter in place -- pipeline.py and _safe_assertion_expr both read
+    # obj["observations"] afterward and expect it to already be validated.
+    obj["observations"] = _validate_and_filter_observations(obj.get("observations", []), profile)
     return True
 
 
-def _safe_assertion_expr(code: str) -> bool:
+def _safe_assertion_expr(code: str, known_names: set) -> bool:
     """Only promote AI-suggested assertion code to an executable assert line
-    if it parses as a single, simple boolean-ish expression with no calls to
-    anything beyond attribute/subscript access -- a lightweight allowlist,
-    not a full sandbox. Anything else stays a commented suggestion."""
+    if it (a) parses as a single, simple boolean-ish expression with no
+    calls to anything beyond attribute/subscript access, AND (b) references
+    only variable names guaranteed to exist in the rendered test
+    (known_names: the profile's result_var plus any validated
+    observations[].var_name) -- otherwise the promoted assert would raise
+    NameError at run time the moment someone tries to use it, which is
+    exactly the bug this parameter closes. A lightweight allowlist, not a
+    full sandbox. Anything that fails either check stays a commented
+    suggestion instead."""
     if not code or len(code) > 200:
         return False
     try:
@@ -259,12 +333,16 @@ def _safe_assertion_expr(code: str) -> bool:
                 if node.func.attr not in ("strip", "lower", "upper", "findtext", "get"):
                     return False
             elif isinstance(node.func, ast.Name):
-                if node.func.id not in ("len", "str", "int"):
+                if node.func.id not in _ALLOWED_BUILTIN_NAMES:
                     return False
             else:
                 return False
-        if isinstance(node, ast.Name) and node.id in ("eval", "exec", "os", "sys", "open", "__import__"):
-            return False
+        if isinstance(node, ast.Name):
+            if node.id in ("eval", "exec", "os", "sys", "open", "__import__"):
+                return False
+            if (isinstance(node.ctx, ast.Load) and node.id not in _ALLOWED_BUILTIN_NAMES
+                    and node.id not in known_names):
+                return False
     return True
 
 
@@ -289,11 +367,12 @@ def generate_ai_test_intent(rfc_label: str, req_row: dict, related: list, profil
         logger.warning(f"AI generation failed for {req_row['requirement_id']}: {e}")
         return None, f"heuristic-fallback:api-error"
 
-    if not _validate_intent(obj):
+    if not _validate_intent(obj, profile):
         logger.warning(f"AI response failed schema validation for {req_row['requirement_id']}")
         return None, "heuristic-fallback:invalid-schema"
 
-    obj["assertion_code_is_safe"] = _safe_assertion_expr(obj.get("assertion_code", ""))
+    known_names = {profile.result_var} | {o["var_name"] for o in obj["observations"]}
+    obj["assertion_code_is_safe"] = _safe_assertion_expr(obj.get("assertion_code", ""), known_names)
     return obj, f"ai-{obj['confidence']}"
 
 

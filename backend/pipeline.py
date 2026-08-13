@@ -664,7 +664,7 @@ DOC_TEMPLATE = """# {test_id}
 {assertion_hint}
 
 **Observation point:** `{pyez_observation}`
-
+{observations_doc_block}
 ## Safety
 
 - Lab-only execution: **Yes**
@@ -739,7 +739,7 @@ def test_{test_id}(r1, r2):
     # PyEZ observation point (AI-suggested): {pyez_observation}
     _info = r1.{observation_call}
     {result_var} = _info.findtext("{observation_field}")
-
+{extra_observations_block}
     # --- assertion ---
     # Expected: {assertion_hint}
     assert {result_var} is not None, "Could not read {result_var} via PyEZ RPC"
@@ -776,6 +776,45 @@ def infer_test_type(category: str, keyword: str) -> str:
     if category in ("connection_management",) and "collision" in keyword.lower():
         return "recovery"
     return "positive"
+
+
+def _render_extra_observations(observations: list, profile) -> str:
+    """Renders AI-declared extra data fetches into real PyEZ code -- the AI
+    only ever supplies a variable name, a source key (validated against
+    profile.secondary_observations), and an XPath string; the actual RPC
+    call text always comes from the trusted profile, never from AI output.
+    Secondary sources are deduped so a shared source is only fetched once
+    even if multiple declared variables read from it. Returns '' if there's
+    nothing to add (the common case: no extra observations declared)."""
+    if not observations:
+        return ""
+    lines = ["", "    # additional AI-requested observation(s)"]
+    holder_var_by_source = {}
+    for obs in observations:
+        if obs["source"] == "primary":
+            lines.append(f'    {obs["var_name"]} = _info.findtext("{obs["xpath"]}")')
+            continue
+        source_key = obs["source"]
+        holder_var = holder_var_by_source.get(source_key)
+        if holder_var is None:
+            holder_var = f"_{source_key}"
+            holder_var_by_source[source_key] = holder_var
+            lines.append(f'    {holder_var} = r1.{profile.secondary_observations[source_key]}')
+        lines.append(f'    {obs["var_name"]} = {holder_var}.findtext("{obs["xpath"]}")')
+    return "\n".join(lines) + "\n"
+
+
+def _render_observations_doc(observations: list, profile) -> str:
+    """Doc-side counterpart to _render_extra_observations -- lists the same
+    declared fetches for human traceability. '' if none were declared."""
+    if not observations:
+        return ""
+    lines = ["", "**Additional observations captured:**"]
+    for obs in observations:
+        source_desc = ("the primary observation above" if obs["source"] == "primary"
+                        else f'`{obs["source"]}` ({profile.secondary_observations[obs["source"]]})')
+        lines.append(f'- `{obs["var_name"]}` = `{obs["xpath"]}` via {source_desc}')
+    return "\n".join(lines) + "\n"
 
 
 def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived_from: str, profile) -> dict:
@@ -818,6 +857,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             confidence = ai_intent["confidence"]
             assertion_code = ai_intent.get("assertion_code", "")
             assertion_is_safe = ai_intent.get("assertion_code_is_safe", False) and confidence == "high"
+            observations = ai_intent.get("observations", [])
             needs_review = 0 if confidence == "high" else 1
         else:
             # Heuristic fallback -- same defaults as before AI was wired in.
@@ -834,6 +874,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             confidence = "n/a"
             assertion_code = ""
             assertion_is_safe = False
+            observations = []
             needs_review = 1
 
         test_id = rid.lower().replace("-", "_").replace(".", "_")
@@ -846,6 +887,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         review_flag = " — ⚠ **NEEDS ENGINEER REVIEW**" if needs_review else ""
         notes_block = f"\n## Notes\n\n{notes}\n" if notes else ""
         topology_note_fmt = f" — {topology_note}" if topology_note else ""
+        observations_doc_block = _render_observations_doc(observations, profile)
 
         doc_content = DOC_TEMPLATE.format(
             test_id=test_id, rid=rid, rfc=rfc_label, section_id=req_dict["section_id"],
@@ -855,6 +897,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             topology_note=topology_note_fmt, timers_line=profile.timers_line(timers),
             steps="\n".join(f"{i+1}. {s}" for i, s in enumerate(steps)),
             assertion_hint=assertion_hint, pyez_observation=pyez_observation,
+            observations_doc_block=observations_doc_block,
             emulator_note=emulator_note, keyword=keyword, statement=req_dict["statement"],
             reuse_note=reuse_note, notes_block=notes_block, protocol_reasoning=protocol_reasoning,
         )
@@ -879,6 +922,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         ) if requires_emulator else "    # (positive-path stimulus -- standard peering brings this up naturally)"
 
         config_stanza = Template(profile.config_template).substitute(**timers)
+        extra_observations_block = _render_extra_observations(observations, profile)
 
         pytest_content = PYTEST_TEMPLATE.format(
             rid=rid, rfc=rfc_label, section_id=req_dict["section_id"], section_title=req_dict["section_title"],
@@ -888,6 +932,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             emulator_warning=emulator_warning, pyez_observation=pyez_observation,
             config_stanza=config_stanza, observation_call=profile.observation_call,
             observation_field=profile.observation_field, result_var=profile.result_var,
+            extra_observations_block=extra_observations_block,
             assertion_hint=assertion_hint, stimulus_block=stimulus_block, assertion_block=assertion_block,
         )
 

@@ -7,7 +7,24 @@
       "Bash(npm ls *)",
       "Bash(env)",
       "Bash(pip list *)",
-      "Bash(/home/venkatesh/juniper/poc/bgp_rfc_functional_prototype_2/backend/.venv/Scripts/python.exe -m pip list)"
+      "Bash(/home/venkatesh/juniper/poc/bgp_rfc_functional_prototype_2/backend/.venv/Scripts/python.exe -m pip list)",
+      "Bash(python3 -m venv /tmp/claude-1000/-home-venkatesh-juniper-poc-bgp-rfc-functional-prototype-2/bbb10bb0-20df-42f7-9686-4214c255433c/scratchpad/venv)",
+      "Read(//tmp/**)",
+      "Bash(curl -sf -m 3 http://localhost:5000/api/status)",
+      "Bash(cat /tmp/app_server.log)",
+      "Bash(curl -s http://localhost:5000/api/tests/rfc2328_s2_req_01)",
+      "Bash(python3 -c ' *)",
+      "Bash(SCRATCH=/tmp/claude-1000/-home-venkatesh-juniper-poc-bgp-rfc-functional-prototype-2/bbb10bb0-20df-42f7-9686-4214c255433c/scratchpad *)",
+      "Read(//usr/bin/**)",
+      "Bash(/tmp/claude-1000/-home-venkatesh-juniper-poc-bgp-rfc-functional-prototype-2/bbb10bb0-20df-42f7-9686-4214c255433c/scratchpad/venv/bin/python -c ' *)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('ai_generation.py'\\).read\\(\\)\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('pipeline.py'\\).read\\(\\)\\)\")",
+      "Bash(python3 verify_generated_tests.py)",
+      "Bash(/tmp/claude-1000/-home-venkatesh-juniper-poc-bgp-rfc-functional-prototype-2/bbb10bb0-20df-42f7-9686-4214c255433c/scratchpad/venv/bin/python /tmp/claude-1000/-home-venkatesh-juniper-poc-bgp-rfc-functional-prototype-2/bbb10bb0-20df-42f7-9686-4214c255433c/scratchpad/ospf_assertion_proof.py)",
+      "Bash(mkdir -p /tmp/pre_regen_backup)",
+      "Bash(cp kb/knowledge.db /tmp/pre_regen_backup/)",
+      "Bash(cp kb/retrieval_index.pkl /tmp/pre_regen_backup/)",
+      "Bash(rm -rf /tmp/pre_regen_backup/generated_tests)"
     ]
   }
 }

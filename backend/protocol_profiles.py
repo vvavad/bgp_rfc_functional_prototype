@@ -40,7 +40,7 @@ class ProtocolProfile:
     def __init__(self, key, display_name, rfc_numbers, title_keywords, category_rules,
                  topology_key, topology_description, timer_fields, timer_category_override,
                  config_template, observation_call, observation_field, result_var,
-                 default_emulator_tool, expertise_note):
+                 default_emulator_tool, expertise_note, secondary_observations=None):
         self.key = key
         self.display_name = display_name
         self.rfc_numbers = rfc_numbers
@@ -56,6 +56,12 @@ class ProtocolProfile:
         self.result_var = result_var  # variable name used in the rendered pytest stub
         self.default_emulator_tool = default_emulator_tool
         self.expertise_note = expertise_note  # short phrase for the AI system prompt
+        # Small trusted menu of ADDITIONAL PyEZ calls the AI's Test Intent may
+        # request by key (never by writing the call itself) when the primary
+        # observation_call/field isn't enough to check the specific
+        # requirement -- e.g. AS_PATH content needs a route lookup, not just
+        # peer state. {key: trusted PyEZ call string}. Empty dict = no menu.
+        self.secondary_observations = secondary_observations or {}
 
     def timers_for(self, category: str) -> dict:
         timers = {f["key"]: f["default"] for f in self.timer_fields}
@@ -119,6 +125,9 @@ BGP_PROFILE = ProtocolProfile(
     result_var="peer_state",
     default_emulator_tool="ExaBGP/Scapy",
     expertise_note="BGP peering, path attributes, and the BGP FSM",
+    secondary_observations={
+        "route_table": "rpc.get_route_information(table='inet.0')",
+    },
 )
 
 OSPF_PROFILE = ProtocolProfile(
@@ -168,6 +177,9 @@ OSPF_PROFILE = ProtocolProfile(
     result_var="neighbor_state",
     default_emulator_tool="Scapy",
     expertise_note="OSPF neighbor discovery, LSA flooding, and SPF-based route computation",
+    secondary_observations={
+        "lsdb": "rpc.get_ospf_database_information()",
+    },
 )
 
 GENERIC_PROFILE = ProtocolProfile(
