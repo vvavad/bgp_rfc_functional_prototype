@@ -36,17 +36,50 @@ BASE = Path(__file__).resolve().parent
 KB_DIR = BASE / "kb"
 DOCS_DIR = BASE / "generated_tests" / "docs"
 PYTEST_DIR = BASE / "generated_tests" / "pytest"
+# Deduplicated view: the full, unfiltered record of everything ever
+# generated stays in DOCS_DIR/PYTEST_DIR above; this is the curated subset
+# with duplicate tests (see _dedup_key) collapsed to one representative
+# each -- refreshed wholesale by refresh_deduplicated_tests() after every
+# generation batch, not incrementally maintained.
+DEDUP_DOCS_DIR = BASE / "generated_tests" / "deduplicated" / "docs"
+DEDUP_PYTEST_DIR = BASE / "generated_tests" / "deduplicated" / "pytest"
+LOGS_DIR = BASE / "logs"
 DB_PATH = KB_DIR / "knowledge.db"
 RETRIEVAL_INDEX_PATH = KB_DIR / "retrieval_index.pkl"
 ARTEFACTS_DIR = KB_DIR / "artefacts"
 UPLOADED_TESTS_DIR = KB_DIR / "uploaded_tests"
 
-for d in (KB_DIR, DOCS_DIR, PYTEST_DIR, ARTEFACTS_DIR, UPLOADED_TESTS_DIR):
+for d in (KB_DIR, DOCS_DIR, PYTEST_DIR, DEDUP_DOCS_DIR, DEDUP_PYTEST_DIR, ARTEFACTS_DIR, UPLOADED_TESTS_DIR, LOGS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 SUPPORTED_UPLOAD_EXTENSIONS = (".txt", ".md", ".log", ".pdf", ".py")
 COVERAGE_CANDIDATE_K = 15
 MAX_TEST_CONTENT_CHARS = 8000
+
+# ------------------------------------------------------------------ #
+# Process log — a real file on disk recording generation activity (RFC
+# ingests, per-test AI-vs-heuristic outcome, dedup results), not just the
+# in-DB ingestion_log table the dashboard reads. Attached to this module's
+# logger and ai_generation's (by name, not the root logger) so Flask's own
+# request/werkzeug logging isn't pulled in here.
+# ------------------------------------------------------------------ #
+
+PROCESS_LOG_PATH = LOGS_DIR / "generation.log"
+
+
+def _setup_process_log_file():
+    for logger_name in ("pipeline", "ai_generation"):
+        target = logging.getLogger(logger_name)
+        if any(getattr(h, "_is_process_log_handler", False) for h in target.handlers):
+            continue  # already configured -- avoid duplicate handlers on re-import/reload
+        handler = logging.FileHandler(PROCESS_LOG_PATH, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+        handler._is_process_log_handler = True
+        target.addHandler(handler)
+        target.setLevel(logging.INFO)
+
+
+_setup_process_log_file()
 
 # ------------------------------------------------------------------ #
 # Schema
@@ -569,11 +602,15 @@ def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str
     conn.commit()
     conn.close()
 
-    # Clear old generated test files (fresh RFC = fresh test package)
-    for f in list(DOCS_DIR.glob("*.md")) + list(PYTEST_DIR.glob("*.py")):
+    # Clear old generated test files (fresh RFC = fresh test package) --
+    # both the full record and the deduplicated view.
+    for f in (list(DOCS_DIR.glob("*.md")) + list(PYTEST_DIR.glob("*.py"))
+              + list(DEDUP_DOCS_DIR.glob("*.md")) + list(DEDUP_PYTEST_DIR.glob("*.py"))):
         f.unlink()
 
     _build_retrieval_index()
+    logger.info(f"Ingested RFC {rfc_number} ({rfc_title!r}): {len(requirements)} requirements extracted, "
+                f"protocol={profile.key}, source={source_label}")
     return {"requirement_count": len(requirements)}
 
 
@@ -844,6 +881,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         ai_backend = ai_generation.get_active_backend_key() if ai_intent else ""
 
         if ai_intent:
+            logger.info(f"{rid}: generated via AI backend '{ai_backend}' (mode={mode})")
             test_type = ai_intent["test_type"]
             risk = ai_intent["risk"]
             protocol_reasoning = ai_intent["protocol_reasoning"]
@@ -856,10 +894,17 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             notes = ai_intent.get("notes", "")
             confidence = ai_intent["confidence"]
             assertion_code = ai_intent.get("assertion_code", "")
-            assertion_is_safe = ai_intent.get("assertion_code_is_safe", False) and confidence == "high"
+            # Promotion to an executable assert depends only on the safety
+            # check (AST allowlist + known-variable-names, see
+            # ai_generation._safe_assertion_expr) -- confidence no longer
+            # gates this; it still gates needs_review below, since a safe-
+            # to-run assertion can still be worth a second look if the
+            # model wasn't sure about it.
+            assertion_is_safe = ai_intent.get("assertion_code_is_safe", False)
             observations = ai_intent.get("observations", [])
             needs_review = 0 if confidence == "high" else 1
         else:
+            logger.info(f"{rid}: AI unavailable/failed ({mode}) -- used heuristic fallback")
             # Heuristic fallback -- same defaults as before AI was wired in.
             test_type = infer_test_type(category, keyword)
             risk = "high" if test_type in ("negative", "recovery") else ("medium" if test_type == "boundary" else "low")
@@ -964,6 +1009,56 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         }
 
 
+def _dedup_key(row) -> tuple:
+    """Two tests count as duplicates if they'd exercise the exact same
+    check the exact same way: same test_type and identical protocol
+    reasoning. This catches the real, observed duplication case --
+    heuristic-fallback tests share ONE fixed reasoning string per
+    test_type (STEPS_BY_TYPE/ASSERTION_BY_TYPE are lookup tables, not
+    per-requirement reasoning, so any two heuristic tests of the same
+    test_type render identical Steps/Assertion text) -- without
+    over-merging genuine AI reasoning, which is unique per test in
+    practice (verified across every real generation run so far)."""
+    return (row["test_type"], (row["protocol_reasoning"] or "").strip())
+
+
+def refresh_deduplicated_tests() -> dict:
+    """Recomputes the deduplicated view from the FULL current catalog (not
+    just the latest batch -- a new test can duplicate one from an older
+    batch) and rewrites generated_tests/deduplicated/ from scratch each
+    time. generated_tests/docs and generated_tests/pytest are never
+    touched by this -- they stay the complete, unfiltered record of
+    everything ever generated; this is purely an additional curated view.
+    Within each duplicate group, keeps the earliest-created test."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT test_id, test_type, protocol_reasoning, doc_content, pytest_content "
+        "FROM test_intents ORDER BY created_at"
+    ).fetchall()
+    conn.close()
+
+    groups = defaultdict(list)
+    for r in rows:
+        groups[_dedup_key(r)].append(r)
+
+    for f in list(DEDUP_DOCS_DIR.glob("*.md")) + list(DEDUP_PYTEST_DIR.glob("*.py")):
+        f.unlink()
+
+    kept = 0
+    for members in groups.values():
+        representative = members[0]  # earliest created_at -- rows are ordered
+        (DEDUP_DOCS_DIR / f"{representative['test_id']}.md").write_text(
+            representative["doc_content"], encoding="utf-8")
+        (DEDUP_PYTEST_DIR / f"test_{representative['test_id']}.py").write_text(
+            representative["pytest_content"], encoding="utf-8")
+        kept += 1
+    duplicates_ignored = len(rows) - kept
+
+    logger.info(f"Deduplication refresh: {len(rows)} total test(s), {kept} unique kept, "
+                f"{duplicates_ignored} duplicate(s) ignored")
+    return {"total": len(rows), "unique": kept, "duplicates_ignored": duplicates_ignored}
+
+
 def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_from: str = ""):
     """The single generation entry point. For each requirement, retrieves a
     small context pack (the requirement itself + semantically related ones
@@ -1000,6 +1095,9 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
             skipped.append(rid)
             continue
         to_process.append(dict(row))
+
+    logger.info(f"Batch #{batch_id} ('{batch_label}'): {len(to_process)} requirement(s) to generate, "
+                f"{len(skipped)} skipped (already covered or unknown)")
 
     created = []
     if to_process:
@@ -1048,7 +1146,10 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
     )
     conn.commit()
     conn.close()
-    return {"batch_id": batch_id, "created": created, "skipped_already_covered": skipped}
+    logger.info(f"Batch #{batch_id} complete: {len(created)} created, {len(skipped)} skipped, mode={ai_mode_note}")
+
+    dedup_summary = refresh_deduplicated_tests()
+    return {"batch_id": batch_id, "created": created, "skipped_already_covered": skipped, "dedup": dedup_summary}
 
 
 # ------------------------------------------------------------------ #

@@ -76,11 +76,17 @@ doc/pytest text is produced.
   a candidate assertion) — it never writes Python directly. The same
   deterministic template renderer from before turns that JSON into doc +
   pytest text, so nothing ships that skipped the "compiler" step
-- **Confidence-based routing:** the model self-reports confidence. High-
-  confidence assertions get promoted into an executable `assert` line
-  (after passing a static safety check — no imports, no arbitrary function
-  calls, expression-only); medium/low confidence keeps the suggestion as a
-  comment and flags the test `needs_review` in the catalog
+- **Safety-gated assertion promotion:** any assertion the model suggests gets
+  promoted into an executable `assert` line as long as it passes a static
+  safety check — no imports, no arbitrary function calls, and every variable
+  name it references is guaranteed to actually exist in the rendered test
+  (either the one value fetched by default, or an additional named
+  observation the model explicitly declared and pipeline.py wired up —
+  see `backend/protocol_profiles.py`'s `secondary_observations`). Promotion
+  no longer depends on the model's self-reported confidence — a real,
+  runnable check beats none — but confidence still independently flags the
+  test `needs_review` in the catalog, so a low-confidence assertion still
+  gets a second look even though it's guaranteed not to crash
 - **Graceful fallback:** no backend available (neither CLI nor API key), or a
   failed/malformed response from whichever one answered → generation still
   succeeds, just via the original heuristic templates, clearly labeled
@@ -163,8 +169,15 @@ backend/
     artefacts/        uploaded product specs / other reference files (original bytes)
     uploaded_tests/   uploaded existing test files reviewed for RFC coverage (original bytes)
   generated_tests/
-    docs/             generated Markdown test cases
-    pytest/           generated pytest/PyEZ stubs
+    docs/             generated Markdown test cases -- the full, unfiltered record
+    pytest/           generated pytest/PyEZ stubs -- the full, unfiltered record
+    deduplicated/
+      docs/, pytest/  curated subset with duplicate tests collapsed to one
+                      representative each (see pipeline.refresh_deduplicated_tests) --
+                      docs/pytest above are untouched, this is an additional view
+  logs/
+    generation.log    process log: RFC ingests, dedup results, and per-test
+                      AI-backend-vs-heuristic-fallback outcome for every generated test
 frontend/
   index.html, style.css, app.js    no build step, plain fetch() calls
 ```

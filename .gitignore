@@ -18,3 +18,7 @@ backend/kb/uploaded_tests/
 # Generated test output — derived from the knowledge base, not source
 backend/generated_tests/docs/
 backend/generated_tests/pytest/
+backend/generated_tests/deduplicated/
+
+# Process log — derived at runtime, not source
+backend/logs/

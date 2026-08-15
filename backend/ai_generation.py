@@ -15,10 +15,14 @@ reviewable, non-hallucinated boundary between "AI reasoning" and "executed
 code" -- if the model's JSON doesn't validate, generation falls back to the
 heuristic path rather than emitting untrusted code.
 
-Confidence-based routing (same idea as the proposal's review gates):
-  - high   -> assertion_code is promoted into an executable `assert` line
-  - medium/low -> assertion_code is kept as a commented suggestion only;
-                  the test is flagged for engineer review in the catalog
+Assertion promotion is gated on safety, not confidence: any assertion_code
+that passes _safe_assertion_expr (no imports/dangerous calls, and every
+name it references is guaranteed to exist -- see known_names) is promoted
+into an executable `assert` line regardless of confidence, so a real check
+runs instead of nothing. Confidence still drives needs_review in the
+catalog independently -- a safe-to-run assertion from a low-confidence
+Test Intent is still flagged for a human to double-check the reasoning
+behind it, even though the assertion itself is guaranteed not to crash.
 """
 import os
 import re
