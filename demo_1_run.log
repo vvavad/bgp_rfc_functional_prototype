@@ -1,292 +1,300 @@
-======================================================================
-Demo run log — demo_1.md — 2026-08-13 14:36:02 UTC
-======================================================================
+=== demo_1.md end-to-end run started at 2026-08-15T16:12:32Z ===
 
-Pre-run note: cleaning up backend/generated_tests (stale heuristic-
-fallback duplicates from before an AI backend existed) is the goal
-of this run. Interpretation: wipe files + DB to a genuine blank slate
-BEFORE step 1's backup, then follow demo_1.md's steps 1-7 verbatim.
-Step 7's restore will therefore restore THIS run's fresh, fully
-AI-generated state -- not the old backup with 29 stale tests.
+--- Step 1: pre-demo cleanup/backup ---
+Backup contents:
+total 740
+drwxr-xr-x  3 venkatesh venkatesh   4096 Aug 15 16:12 .
+drwxrwxrwt 14 root      root       20480 Aug 15 16:12 ..
+drwxr-xr-x  5 venkatesh venkatesh   4096 Aug 15 16:12 generated_tests
+-rw-r--r--  1 venkatesh venkatesh 499712 Aug 15 16:12 knowledge.db
+-rw-r--r--  1 venkatesh venkatesh 225726 Aug 15 16:12 retrieval_index.pkl
+Backed-up generated_tests counts:
+79
+78
 
-
----------------------------------------------------------------------
-PRE-STEP: cleanup generated_tests/ + knowledge base (blank slate)
----------------------------------------------------------------------
-$ rm -f kb/knowledge.db kb/retrieval_index.pkl generated_tests/docs/*.md generated_tests/pytest/*.py
-before:
-  docs: 77, pytest: 77, knowledge.db present: yes
-after:
-  docs: 0, pytest: 0, knowledge.db present: no
-
----------------------------------------------------------------------
-STEP 1: pre-demo backup + dependency/AI-backend check
----------------------------------------------------------------------
-$ mkdir -p /tmp/poc_demo_backup && cp kb/knowledge.db kb/retrieval_index.pkl /tmp/poc_demo_backup/ ; cp -r generated_tests /tmp/poc_demo_backup/
-cp: cannot stat 'kb/knowledge.db': No such file or directory
-cp: cannot stat 'kb/retrieval_index.pkl': No such file or directory
-(backup step ran -- knowledge.db/retrieval_index.pkl copy errors above are EXPECTED and harmless: we just deleted them in the pre-step, so there's nothing to back up yet. generated_tests/ backup is real, just currently empty.)
-generated_tests
-
-$ pip install -r requirements.txt
-(dependency install output suppressed with -q; exit code: 0)
-
-$ python3 -c "import pipeline; print(pipeline.get_ai_status())"
+--- Step 1b/1c: dependency check + AI status ---
 {'ai_available': True, 'model': 'claude-opus-4-8', 'backend': 'claude-code-cli', 'backend_mode_requested': 'auto', 'mode': 'ai'}
 
----------------------------------------------------------------------
-STEP 2: start the app -- RFC ingestion happens here
----------------------------------------------------------------------
-$ python app.py   (unbuffered -u so console output streams live into this log)
-server PID: 12990
-No requirements in knowledge base yet -- ingesting bundled RFC 4271...
-Ingested 203 requirements.
+--- Step 1 Option A: clean slate ---
+Remaining files after cleanup:
+kb dir:
+artefacts
+rfc4271_raw.txt
+uploaded_tests
+
+--- Step 2: start app.py, bootstrap ingestion ---
 No requirements in knowledge base yet -- ingesting bundled RFC 4271...
 Ingested 203 requirements.
 Generated seed demo package of 28 tests across 10 categories.
- * Serving Flask app 'app'
- * Debug mode: off
-[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
- * Running on all addresses (0.0.0.0)
- * Running on http://127.0.0.1:5000
- * Running on http://172.19.75.135:5000
-[33mPress CTRL+C to quit[0m
-127.0.0.1 - - [13/Aug/2026 15:15:34] "GET /api/status HTTP/1.1" 200 -
 
---- verification: confirm the seed package is now fully AI-generated, no heuristic fallback ---
-ai-low 14
-ai-medium 11
-ai-high 3
+--- Step 3: dashboard tour (equivalent API checks) ---
+/api/status:
+{"ai":{"ai_available":true,"backend":"claude-code-cli","backend_mode_requested":"auto","mode":"ai","model":"claude-opus-4-8"},"coverage_summary":{"automatable_coverage_pct":14.3,"gap_count":168,"overall_coverage_pct":13.8,"tests_generated":28,"total_requirements":203},"rfc":{"id":1,"ingested_at":"2026-08-15T16:13:11","protocol_display_name":"BGP (Border Gateway Protocol)","protocol_key":"bgp","rfc_number":"4271","rfc_title":"A Border Gateway Protocol 4 (BGP-4)","source":"kb/rfc4271_raw.txt (bundled seed)"}}
 
----------------------------------------------------------------------
-STEP 3: dashboard tour
----------------------------------------------------------------------
-$ curl / /app.js /style.css (frontend assets)
-  / -> HTTP 200
-  /app.js -> HTTP 200
-  /style.css -> HTTP 200
+/api/ingestion-log:
+[{"event":"RFC_INGESTED (RFC 4271, 203 requirements extracted, protocol=bgp)","source":"kb/rfc4271_raw.txt (bundled seed)","timestamp":"2026-08-15T16:13:11"},{"event":"TESTS_GENERATED (batch #1, 28 new tests, label='seed-demo-package', mode=AI reasoning via claude-code-cli)","source":"kb/knowledge.db ONLY -- raw RFC text not reopened","timestamp":"2026-08-15T16:17:29"}]
 
-$ curl /api/status
+--- Step 4: generate 5 tests live for category 'path_attribute' ---
+{"batch_id":2,"created":["rfc4271_s5_1_1_req_03","rfc4271_s5_1_1_req_04","rfc4271_s5_1_1_req_05","rfc4271_s5_1_1_req_06","rfc4271_s5_1_1_req_07"],"dedup":{"duplicates_ignored":0,"total":33,"unique":33},"skipped_already_covered":[]}
+
+--- Step 4 (cont.): inspect one newly-generated test detail ---
 {
-    "ai": {
-        "ai_available": true,
-        "backend": "claude-code-cli",
-        "backend_mode_requested": "auto",
-        "mode": "ai",
-        "model": "claude-opus-4-8"
-    },
-    "coverage_summary": {
-        "automatable_coverage_pct": 14.3,
-        "gap_count": 168,
-        "overall_coverage_pct": 13.8,
-        "tests_generated": 28,
-        "total_requirements": 203
-    },
-    "rfc": {
-        "id": 1,
-        "ingested_at": "2026-08-13T15:11:16",
-        "protocol_display_name": "BGP (Border Gateway Protocol)",
-        "protocol_key": "bgp",
-        "rfc_number": "4271",
-        "rfc_title": "A Border Gateway Protocol 4 (BGP-4)",
-        "source": "kb/rfc4271_raw.txt (bundled seed)"
-    }
+    "ai_backend": "claude-code-cli",
+    "batch_id": 2,
+    "category": "path_attribute",
+    "created_at": "2026-08-15T17:48:03",
+    "derived_from": "",
+    "doc_content": "# rfc4271_s5_1_1_req_03\n\n| Field | Value |\n|---|---|\n| RFC Reference | RFC4271-S5.1.1-REQ-03 \u2014 RFC 4271 (A Border Gateway Protocol 4 (BGP-4)), \u00a75.1.1 (ORIGIN) |\n| Test Type | positive |\n| Category | path_attribute |\n| Risk | medium |\n| Priority | medium |\n| Generation Mode | ai-medium \u2014 \u26a0 **NEEDS ENGINEER REVIEW** |\n\n## Normative Statement\n\n> **SHOULD:** If the act of prepending will cause an overflow in the AS_PATH segment (i.e., more than 255 ASes), it SHOULD prepend a new segment of type AS_SEQUENCE and prepend its own AS number to this new segment. 2) if the first path segment of the AS_PATH is of type AS_SET, the local system prepends a new path segment of type AS_SEQUENCE to the AS_PATH, including its own AS number in that segment. 3) if the AS_PATH is empty, the local system creates a path segment of type AS_SEQUENCE, places its own AS into that segment, and places that segment into the AS_PATH. When a BGP speaker originates a route then: a) the originating speaker includes its own AS number in a path segment, of type AS_SEQUENCE, in the AS_PATH attribute of all UPDATE messages sent to an external peer.\n\n## Protocol Reasoning\n\nWhen a BGP speaker originates a route to an external (eBGP) peer, RFC 4271 5.1.1 requires it to include its own AS number in a path segment of type AS_SEQUENCE in the AS_PATH attribute. Since a locally-originated route starts with an empty AS_PATH, this collapses to case (3)/(a): the originator must create a single AS_SEQUENCE segment containing exactly its own ASN. On the wire this is externally observable as the AS_PATH the eBGP peer receives, where an AS_SEQUENCE renders in Junos as a bare ASN list and an AS_SET would render inside curly braces.\n\n## Preconditions\n\n- **Topology:** two-router-ebgp (R1 AS 65001 \u2194 R2 AS 65002) \u2014 Default R1 (AS 65001, Junos under test as originator) <-> R2 (AS 65002, eBGP). R1 originates a route (static + export policy). The AS_PATH produced by origination is only visible in the Adj-RIB-In of the receiving peer, so the route_table observation must be taken on R2 (the eBGP peer that received the originated route), not on R1's own inet.0 where a locally-originated route carries no prepended AS_PATH.\n- **Timers:** Hold = 90, KeepAlive = 30, ConnectRetry = 120\n- **Devices:** Juniper vJunos-router / vMX pair reachable via NETCONF (PyEZ)\n\n\n## Test Steps\n\n1. Establish the eBGP session between R1 (AS 65001) and R2 (AS 65002) and confirm it reaches Established.\n2. On R1 (Junos under test), create a route to originate (e.g., a static/discard route or a directly connected prefix) and an export policy that advertises this prefix into BGP toward R2.\n3. On R2, inspect the received route's AS_PATH via the route table and verify it consists of a single AS_SEQUENCE segment containing R1's ASN (65001).\n\n## Expected Result\n\n1. The eBGP session between R1 and R2 is Established, so the originated route can actually be advertised and observed.\n2. The AS_PATH of the originated route received by the eBGP peer includes the originating speaker's own AS number (65001).\n3. The originating speaker's AS number is carried in an AS_SEQUENCE segment, not an AS_SET (Junos renders AS_SET members inside curly braces, so a conformant AS_SEQUENCE origination shows no braces).\n\n**Observation point:** `rpc.get_bgp_neighbor_information() -> .//peer-state for session; rpc.get_route_information(table='inet.0') -> .//rt-entry/as-path on the receiving peer R2 for the originated route's AS_PATH`\n\n**Additional observations captured:**\n- `received_as_path` = `.//rt-entry/as-path` via `route_table` (rpc.get_route_information(table='inet.0'))\n\n## Safety\n\n- Lab-only execution: **Yes**\n- Requires `commit confirmed` on configuration changes: **Yes**\n\n## Traceability\n\n- Knowledge base: `kb/knowledge.db` (retrieved, not re-derived from raw RFC text)\n\n\n## Notes\n\nRequirement bundles four sub-cases (overflow >255 ASes, AS_SET-first prepend, empty AS_PATH, and origination-into-AS_SEQUENCE). Only the origination case (a)/(3) is cleanly reproducible on the default two-router topology without a scriptable peer: the overflow case would need a peer emulator (ExaBGP/Scapy) to inject a route already carrying ~255 ASes, and the AS_SET-first case requires an inbound route whose AS_PATH begins with an AS_SET (typically the product of aggregation upstream), so both are out of scope here and would warrant separate tests. Confidence is medium chiefly because of the observation point: the prepend is only visible on the receiving peer's Adj-RIB-In, so the route_table call must be executed against R2, not the originating Junos device; if the harness only queries the originator, check 2/3 cannot be satisfied and the origin-code suffix (I/E/?) in the as-path text does not affect the substring checks. The '{' brace heuristic depends on Junos' as-path text rendering of AS_SET.\n\n",
+    "emulator_tool": "none",
+    "generation_mode": "ai-medium",
+    "keyword": "SHOULD",
+    "needs_review": 1,
+    "priority": "medium",
+    "protocol_reasoning": "When a BGP speaker originates a route to an external (eBGP) peer, RFC 4271 5.1.1 requires it to include its own AS number in a path segment of type AS_SEQUENCE in the AS_PATH attribute. Since a locally-originated route starts with an empty AS_PATH, this collapses to case (3)/(a): the originator must create a single AS_SEQUENCE segment containing exactly its own ASN. On the wire this is externally observable as the AS_PATH the eBGP peer receives, where an AS_SEQUENCE renders in Junos as a bare ASN list and an AS_SET would render inside curly braces.",
+    "pytest_content": "\"\"\"\nAuto-generated pytest/PyEZ stub -- traced to RFC4271-S5.1.1-REQ-03\nRFC 4271 (A Border Gateway Protocol 4 (BGP-4)), Section 5.1.1 (ORIGIN)\nGeneration mode: ai-medium\n\nRequirement (SHOULD): If the act of prepending will cause an overflow in the AS_PATH segment (i.e., more than 255 ASes), it SHOULD prepend a new segment of type AS_SEQUENCE and prepend its own AS number to this new segment. 2) if the first path segment of the AS_PATH is of type AS_SET, the local system prepends a new path segment of type AS_SEQUENCE to the AS_PATH, including its own AS number in that segment. 3) if the AS_PATH is empty, the local system creates a path segment of type AS_SEQUENCE, places its own AS into that segment, and places that segment into the AS_PATH. When a BGP speaker originates a route then: a) the originating speaker includes its own AS number in a path segment, of type AS_SEQUENCE, in the AS_PATH attribute of all UPDATE messages sent to an external peer.\n\nProtocol reasoning: When a BGP speaker originates a route to an external (eBGP) peer, RFC 4271 5.1.1 requires it to include its own AS number in a path segment of type AS_SEQUENCE in the AS_PATH attribute. Since a locally-originated route starts with an empty AS_PATH, this collapses to case (3)/(a): the originator must create a single AS_SEQUENCE segment containing exactly its own ASN. On the wire this is externally observable as the AS_PATH the eBGP peer receives, where an AS_SEQUENCE renders in Junos as a bare ASN list and an AS_SET would render inside curly braces.\n\nSTATUS: lab-ready stub. Uses real PyEZ call patterns but device host/credentials\nare placeholders -- wire to your vJunos-router/vMX lab inventory before running.\n\"\"\"\nimport pytest\nfrom jnpr.junos import Device\nfrom jnpr.junos.utils.config import Config\n\n\nREQUIREMENT_ID = \"RFC4271-S5.1.1-REQ-03\"\nTEST_TYPE = \"positive\"\nRISK = \"medium\"\nGENERATION_MODE = \"ai-medium\"\n\n\n@pytest.fixture(scope=\"module\")\ndef r1():\n    dev = Device(host=\"R1_LAB_HOST\", user=\"LAB_USER\", password=\"LAB_PASSWORD\", port=22)\n    dev.open()\n    yield dev\n    dev.close()\n\n\n@pytest.fixture(scope=\"module\")\ndef r2():\n    dev = Device(host=\"R2_LAB_HOST\", user=\"LAB_USER\", password=\"LAB_PASSWORD\", port=22)\n    dev.open()\n    yield dev\n    dev.close()\n\n\ndef test_rfc4271_s5_1_1_req_03(r1, r2):\n    \"\"\"\n    Traces to: RFC4271-S5.1.1-REQ-03\n    If the act of prepending will cause an overflow in the AS_PATH segment (i.e., more than 255 ASes), it SHOULD prepend a new segment of type AS_SEQUENCE and prepend its own AS number to this new segment. 2) if the first path segment of the AS_PATH is of type AS_SET, the local system prepends a new path segment of type AS_SEQUENCE to the AS_PATH, including its own AS number in that segment. 3) if the AS_PATH is empty, the local system creates a path segment of type AS_SEQUENCE, places its own AS into that segment, and places that segment into the AS_PATH. When a BGP speaker originates a route then: a) the originating speaker includes its own AS number in a path segment, of type AS_SEQUENCE, in the AS_PATH attribute of all UPDATE messages sent to an external peer.\n\n    Reasoning: When a BGP speaker originates a route to an external (eBGP) peer, RFC 4271 5.1.1 requires it to include its own AS number in a path segment of type AS_SEQUENCE in the AS_PATH attribute. Since a locally-originated route starts with an empty AS_PATH, this collapses to case (3)/(a): the originator must create a single AS_SEQUENCE segment containing exactly its own ASN. On the wire this is externally observable as the AS_PATH the eBGP peer receives, where an AS_SEQUENCE renders in Junos as a bare ASN list and an AS_SET would render inside curly braces.\n    \"\"\"\n    with Config(r1, mode=\"exclusive\") as cu:\n        cu.load(\n            '''\nprotocols {\n    bgp {\n        group EBGP-PEER {\n            type external;\n            peer-as 65002;\n            neighbor R2_LAB_IP {\n                hold-time 90;\n            }\n        }\n    }\n}\n            ''',\n            format=\"text\",\n        )\n        cu.commit(confirm=2)\n\n    # --- stimulus ---\n    # (positive-path stimulus -- standard peering brings this up naturally)\n\n    # --- observation ---\n    # PyEZ observation point (AI-suggested): rpc.get_bgp_neighbor_information() -> .//peer-state for session; rpc.get_route_information(table='inet.0') -> .//rt-entry/as-path on the receiving peer R2 for the originated route's AS_PATH\n    _info = r1.rpc.get_bgp_neighbor_information()\n    peer_state = _info.findtext(\".//peer-state\")\n\n    # additional AI-requested observation(s)\n    _route_table = r1.rpc.get_route_information(table='inet.0')\n    received_as_path = _route_table.findtext('.//rt-entry/as-path')\n\n    # --- assertion ---\n    # Expected checks:\n    #   1. The eBGP session between R1 and R2 is Established, so the originated route can actually be advertised and observed.\n    #   2. The AS_PATH of the originated route received by the eBGP peer includes the originating speaker's own AS number (65001).\n    #   3. The originating speaker's AS number is carried in an AS_SEQUENCE segment, not an AS_SET (Junos renders AS_SET members inside curly braces, so a conformant AS_SEQUENCE origination shows no braces).\n    assert peer_state is not None, \"Could not read peer_state via PyEZ RPC\"\n    assert peer_state == 'Established', \"The eBGP session between R1 and R2 is Established, so the originated route can actually be advertised and observed. (medium confidence) -- verify against lab output\"\n    assert received_as_path is not None and '65001' in received_as_path, \"The AS_PATH of the originated route received by the eBGP peer includes the originating speaker's own AS number (65001). (medium confidence) -- verify against lab output\"\n    assert received_as_path is not None and '{' not in received_as_path and '}' not in received_as_path, \"The originating speaker's AS number is carried in an AS_SEQUENCE segment, not an AS_SET (Junos renders AS_SET members inside curly braces, so a conformant AS_SEQUENCE origination shows no braces). (medium confidence) -- verify against lab output\"\n",
+    "requirement_id": "RFC4271-S5.1.1-REQ-03",
+    "requires_peer_emulator": 0,
+    "risk": "medium",
+    "section_id": "5.1.1",
+    "section_title": "ORIGIN",
+    "statement": "If the act of prepending will cause an overflow in the AS_PATH segment (i.e., more than 255 ASes), it SHOULD prepend a new segment of type AS_SEQUENCE and prepend its own AS number to this new segment. 2) if the first path segment of the AS_PATH is of type AS_SET, the local system prepends a new path segment of type AS_SEQUENCE to the AS_PATH, including its own AS number in that segment. 3) if the AS_PATH is empty, the local system creates a path segment of type AS_SEQUENCE, places its own AS into that segment, and places that segment into the AS_PATH. When a BGP speaker originates a route then: a) the originating speaker includes its own AS number in a path segment, of type AS_SEQUENCE, in the AS_PATH attribute of all UPDATE messages sent to an external peer.",
+    "test_id": "rfc4271_s5_1_1_req_03",
+    "test_type": "positive",
+    "timers": "{\"hold\": 90, \"keepalive\": 30, \"connect_retry\": 120}",
+    "topology": "two-router-ebgp"
 }
 
-$ curl /api/coverage  (category_breakdown)
-  path_attribute            3/59
-  message_format            3/40
-  error_handling            3/26
-  general_conformance       3/17
-  connection_management     3/15
-  update_handling           3/14
-  timer                     3/11
-  fsm_state                 3/10
-  decision_process          3/10
-  capability_negotiation    1/1
+--- Step 5: run deduplicated tests (real pytest subprocess against mocked PyEZ) ---
+{
+    "errored": 0,
+    "failed": 19,
+    "passed": 14,
+    "returncode": 1,
+    "skipped": 0,
+    "stdout_tail": "rror: The previously advertised prefix (198.51.100.0/24) is no longer present in inet.0 (Loc-RIB) after the withdrawal, the observable result of the Decision Process re-running because the route is no longer available for use. (medium confidence) -- verify against lab output\nE   assert 'mock-value' is None\n____________________________ test_rfc4271_s9_req_05 ____________________________\ngenerated_tests/deduplicated/pytest/test_rfc4271_s9_req_05.py:90: in test_rfc4271_s9_req_05\n    assert installed_protocol == 'BGP', \"The installed route in inet.0 for the advertised prefix was learned via BGP, confirming it is the Decision-Process-selected BGP route rather than an unrelated local/static entry. (medium confidence) -- verify against lab output\"\nE   AssertionError: The installed route in inet.0 for the advertised prefix was learned via BGP, confirming it is the Decision-Process-selected BGP route rather than an unrelated local/static entry. (medium confidence) -- verify against lab output\nE   assert 'mock-value' == 'BGP'\nE     \nE     - BGP\nE     + mock-value\n=========================== short test summary info ============================\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s10_req_02.py::test_rfc4271_s10_req_02\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s10_req_03.py::test_rfc4271_s10_req_03\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s10_req_06.py::test_rfc4271_s10_req_06\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s10_req_07.py::test_rfc4271_s10_req_07\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s4_1_req_02.py::test_rfc4271_s4_1_req_02\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s5_1_1_req_01.py::test_rfc4271_s5_1_1_req_01\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s5_1_1_req_04.py::test_rfc4271_s5_1_1_req_04\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s5_1_1_req_06.py::test_rfc4271_s5_1_1_req_06\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s5_req_02.py::test_rfc4271_s5_req_02\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s5_req_08.py::test_rfc4271_s5_req_08\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s5_req_11.py::test_rfc4271_s5_req_11\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s6_2_req_01.py::test_rfc4271_s6_2_req_01\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s6_2_req_05.py::test_rfc4271_s6_2_req_05\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s6_8_req_02.py::test_rfc4271_s6_8_req_02\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s6_req_01.py::test_rfc4271_s6_req_01\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s7_req_01.py::test_rfc4271_s7_req_01\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s9_1_req_04.py::test_rfc4271_s9_1_req_04\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s9_req_02.py::test_rfc4271_s9_req_02\nFAILED generated_tests/deduplicated/pytest/test_rfc4271_s9_req_05.py::test_rfc4271_s9_req_05\n19 failed, 14 passed in 0.12s\n",
+    "tests": [
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_01::test_rfc4271_s10_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The effective/negotiated hold time reported for the peer equals the per-neighbor configured non-default value (30s), proving HoldTimer is honored on a per-peer basis rather than pinned to the 90s default. (medium confidence) -- verify against lab output\nassert '90' == '30'\n  \n  - 30\n  + 90",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_02::test_rfc4271_s10_req_02"
+        },
+        {
+            "duration": 0.0,
+            "message": "ValueError: invalid literal for int() with base 10: 'mock-value'",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_03::test_rfc4271_s10_req_03"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_04::test_rfc4271_s10_req_04"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_05::test_rfc4271_s10_req_05"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The correct peer session is under test (peer-as matches the emulated neighbor AS 65002), confirming the timing capture belongs to the intended DUT-peer relationship. (low confidence) -- verify against lab output\nassert 'mock-value' == '65002'\n  \n  - 65002\n  + mock-value",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_06::test_rfc4271_s10_req_06"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: Session is with the expected external peer AS 65002, confirming the correct neighbor context for any timer/jitter behavior under test. (low confidence) -- verify against lab output\nassert 'mock-value' == '65002'\n  \n  - 65002\n  + mock-value",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_07::test_rfc4271_s10_req_07"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_10::test_rfc4271_s10_req_10"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s10_req_12::test_rfc4271_s10_req_12"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s1_2_req_01::test_rfc4271_s1_2_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s3_req_01::test_rfc4271_s3_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s4_1_req_01::test_rfc4271_s4_1_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The Junos speaker does NOT keep the session Established after receiving a message with an out-of-range Length field or trailing padding; peer-state transitions to a non-Established value (Idle/Connect/Active/OpenSent). (medium confidence) -- verify against lab output\nassert ('Established' is not None and 'Established' != 'Established')\n +  where 'Established' = <built-in method strip of str object at 0x746c71db3ef0>()\n +    where <built-in method strip of str object at 0x746c71db",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s4_1_req_02::test_rfc4271_s4_1_req_02"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The route received by R2 retains the ORIGIN value INCOMPLETE that the peer originated -- Junos rendered AS-path string carries the '?' marker and did NOT rewrite it to IGP ('I'). (medium confidence) -- verify against lab output\nassert ('65001' is not None and '?' in '65001')",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_1_1_req_01::test_rfc4271_s5_1_1_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_1_1_req_03::test_rfc4271_s5_1_1_req_03"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The AS_PATH of the route received by R2 contains more than one consecutive instance of R1's AS (65001), confirming multiple prepending of the local AS is accepted and represented. (medium confidence) -- verify against lab output\nassert ('65001' is not None and 1 >= 2)\n +  where 1 = <built-in method count of list object at 0x746c71c27100>('65001')\n +    where <built-in method count of list object at 0x746c71c27100> = ['65001'].count\n +      where ['65001'] = <built-in method split",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_1_1_req_04::test_rfc4271_s5_1_1_req_04"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_1_1_req_05::test_rfc4271_s5_1_1_req_05"
+        },
+        {
+            "duration": 0.001,
+            "message": "AssertionError: The eBGP-learned prefix's protocol NEXT_HOP on the DUT equals R1's eBGP interface address, i.e. it was preserved (not modified) and matches the value that will be propagated unchanged to the iBGP peer by default. (medium confidence) -- verify against lab output\nassert 'mock-value' == '10.0.12.1'\n  \n  - 10.0.12.1\n  + mock-value",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_1_1_req_06::test_rfc4271_s5_1_1_req_06"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_1_1_req_07::test_rfc4271_s5_1_1_req_07"
+        },
+        {
+            "duration": 0.001,
+            "message": "AssertionError: After receiving an UPDATE that carries NLRI but omits a well-known mandatory attribute, the BGP session must not remain/return to Established (the DUT resets the session as required for an UPDATE Message Error). (medium confidence) -- verify against lab output\nassert 'Established' != 'Established'",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_req_02::test_rfc4271_s5_req_02"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The prefix advertised with the attached transitive optional attribute is accepted and installed in inet.0 (the path carrying the new transitive optional attribute is treated as valid path information). (medium confidence) -- verify against lab output\nassert ('mock-value' is not None and False)\n +  where False = <built-in method startswith of str object at 0x746c71db39f0>('203.0.113')\n +    where <built-in method startswith of str object at 0x746c71db39f0> = 'mock-value'.startswit",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_req_08::test_rfc4271_s5_req_08"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_req_10::test_rfc4271_s5_req_10"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The NLRI carried in the out-of-order UPDATE is accepted and installed into inet.0, confirming the UPDATE was parsed as valid rather than discarded. (medium confidence) -- verify against lab output\nassert ('mock-value' is not None and False)\n +  where False = <built-in method startswith of str object at 0x746c71db39f0>('203.0.113.0')\n +    where <built-in method startswith of str object at 0x746c71db39f0> = 'mock-value'.startswith",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s5_req_11::test_rfc4271_s5_req_11"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: After the erroneous OPEN, R1 does not bring the session to Established (it stays in Idle/Connect/Active/OpenSent), confirming the OPEN was rejected rather than accepted. (medium confidence) -- verify against lab output\nassert ('Established' != 'Established')",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s6_2_req_01::test_rfc4271_s6_2_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The BGP session with the emulated peer that proposed a 1-2 second Hold Time never reaches the Established state (it should remain in Idle/Connect/Active/OpenSent/OpenConfirm after Junos rejects the OPEN). (medium confidence) -- verify against lab output\nassert 'Established' != 'Established'",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s6_2_req_05::test_rfc4271_s6_2_req_05"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: Collision resolution actually closed a connection (a teardown/reset occurred), evidenced by a non-null, non-zero flap/reset count on the neighbor rather than two silently coexisting sessions. (low confidence) -- verify against lab output\nassert ('0' is not None and 0 >= 1)\n +  where 0 = int('0')",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s6_8_req_02::test_rfc4271_s6_8_req_02"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s6_8_req_03::test_rfc4271_s6_8_req_03"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: After the Hold Timer expires, the Junos BGP session leaves the Established state (corroborates that Junos originated a NOTIFICATION and tore the session down). (low confidence) -- verify against lab output\nassert 'Established' != 'Established'",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s6_req_01::test_rfc4271_s6_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: After the peer sends an OPEN with an unsupported (non-4) version, the Junos BGP session never reaches Established (it remains in Active/Connect/OpenSent as it retries), confirming Junos does not accept the mismatched version. (low confidence) -- verify against lab output\nassert 'Established' != 'Established'",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s7_req_01::test_rfc4271_s7_req_01"
+        },
+        {
+            "duration": 0.0,
+            "message": "",
+            "outcome": "passed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s8_1_5_req_03::test_rfc4271_s8_1_5_req_03"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: After the replacement UPDATE, the destination 203.0.113.0/24 is present in the Loc-RIB/Routing Table (inet.0). (medium confidence) -- verify against lab output\nassert 'mock-value' == '203.0.113.0/24'\n  \n  - 203.0.113.0/24\n  + mock-value",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s9_1_req_04::test_rfc4271_s9_1_req_04"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The previously advertised prefix (198.51.100.0/24) is no longer present in inet.0 (Loc-RIB) after the withdrawal, the observable result of the Decision Process re-running because the route is no longer available for use. (medium confidence) -- verify against lab output\nassert 'mock-value' is None",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s9_req_02::test_rfc4271_s9_req_02"
+        },
+        {
+            "duration": 0.0,
+            "message": "AssertionError: The installed route in inet.0 for the advertised prefix was learned via BGP, confirming it is the Decision-Process-selected BGP route rather than an unrelated local/static entry. (medium confidence) -- verify against lab output\nassert 'mock-value' == 'BGP'\n  \n  - BGP\n  + mock-value",
+            "outcome": "failed",
+            "test_id": "generated_tests.deduplicated.pytest.test_rfc4271_s9_req_05::test_rfc4271_s9_req_05"
+        }
+    ],
+    "total": 33
+}
 
-$ curl /api/ingestion-log  (should show exactly one RFC_INGESTED event)
+--- Step 6: confirm exactly one RFC_INGESTED event no matter how many generations happened ---
 [
     {
         "event": "RFC_INGESTED (RFC 4271, 203 requirements extracted, protocol=bgp)",
         "source": "kb/rfc4271_raw.txt (bundled seed)",
-        "timestamp": "2026-08-13T15:11:16"
+        "timestamp": "2026-08-15T16:13:11"
     },
     {
         "event": "TESTS_GENERATED (batch #1, 28 new tests, label='seed-demo-package', mode=AI reasoning via claude-code-cli)",
         "source": "kb/knowledge.db ONLY -- raw RFC text not reopened",
-        "timestamp": "2026-08-13T15:14:44"
+        "timestamp": "2026-08-15T16:17:29"
+    },
+    {
+        "event": "TESTS_GENERATED (batch #2, 5 new tests, label='gap-close:path_attribute', mode=AI reasoning via claude-code-cli)",
+        "source": "kb/knowledge.db ONLY -- raw RFC text not reopened",
+        "timestamp": "2026-08-15T17:48:03"
     }
 ]
 
----------------------------------------------------------------------
-STEP 4: generate a test live -- Test Intent -> actual test
----------------------------------------------------------------------
-$ curl -X POST /api/generate-by-category -d '{"category":"path_attribute","count":5}'
-{
-    "batch_id": 2,
-    "created": [
-        "rfc4271_s5_1_1_req_03",
-        "rfc4271_s5_1_1_req_04",
-        "rfc4271_s5_1_1_req_05",
-        "rfc4271_s5_1_1_req_06",
-        "rfc4271_s5_1_1_req_07"
-    ],
-    "skipped_already_covered": []
-}
-
-$ curl /api/tests/rfc4271_s5_1_1_req_03  (Test Catalog modal -> doc tab)
-generation_mode: ai-high | ai_backend: claude-code-cli | needs_review: 0
-
-# rfc4271_s5_1_1_req_03
-
-| Field | Value |
-|---|---|
-| RFC Reference | RFC4271-S5.1.1-REQ-03 — RFC 4271 (A Border Gateway Protocol 4 (BGP-4)), §5.1.1 (ORIGIN) |
-| Test Type | positive |
-| Category | path_attribute |
-| Risk | medium |
-| Priority | medium |
-| Generation Mode | ai-high |
-
-## Normative Statement
-
-> **SHOULD:** If the act of prepending will cause an overflow in the AS_PATH segment (i.e., more than 255 ASes), it SHOULD prepend a new segment of type AS_SEQUENCE and prepend its own AS number to this new segment. 2) if the first path segment of the AS_PATH is of type AS_SET, the local system prepends a new path segment of type AS_SEQUENCE to the AS_PATH, including its own AS number in that segment. 3) if the AS_PATH is empty, the local system creates a path segment of type AS_SEQUENCE, places its own AS into that segment, and places that segment into the AS_PATH. When a BGP speaker originates a route then: a) the originating speaker includes its own AS number in a path segment, of type AS_SEQUENCE, in the AS_PATH attribute of all UPDATE messages sent to an external peer.
-
-## Protocol Reasoning
-
-Per RFC 4271 5.1.1, when a BGP speaker originates a route and advertises it to an external (eBGP) peer, it must place its own AS number into an AS_SEQUENCE-type path segment of the AS_PATH attribute. A conformant Junos speaker in AS 65001 originating a prefix toward an eBGP peer in AS 65002 must therefore emit an AS_PATH consisting of a single AS_SEQUENCE segment containing only 65001, not an AS_SET and not an empty path. The overflow (>255) and AS_SET-first sub-clauses of this SHOULD are edge cases of the same prepend logic but are not exercised on plain origination.
-
-## Preconditions
-
-- **Topology:** two-router-ebgp (R1 AS 65001 ↔ R2 AS 65002) — Default R1(Junos, AS65001) eBGP R2(Junos, AS65002); R1 originates a test prefix (e.g. via a static route redistributed or configured under protocols bgp export policy), R2 is the observation point for the received AS_PATH.
-- **Timers:** Hold = 90, KeepAlive = 30, ConnectRetry = 120
-- **Devices:** Juniper vJunos-router / vMX pair reachable via NETCONF (PyEZ)
-
-
-## Test Steps
-
-1. On R1 (AS 65001), configure origination of a test prefix (e.g. 203.0.113.0/24) toward the eBGP session with R2 via an export policy, and confirm the eBGP session to R2 reaches Established.
-2. On R2 (AS 65002), fetch the received route for 203.0.113.0/24 from inet.0 and read its as-path attribute and segment typing.
-3. Verify the AS_PATH is a single AS_SEQUENCE segment containing exactly 65001 (no AS_SET braces, not empty, no other ASes).
-
-## Expected Result
-
-Pass iff the route received by R2 carries AS_PATH = a single AS_SEQUENCE segment equal to '65001' with no AS_SET component (Junos renders AS_SET members inside '{ }'); fail if the path is empty, the originating AS is absent, or 65001 appears only inside an AS_SET.
-
-**Observation point:** `rpc.get_route_information(destination='203.0.113.0/24', table='inet.0') on R2 -> .//rt-entry/as-path (text like '65001 I'); AS_SET would appear as '{...}' within that field`
-
-## Safety
-
-- Lab-only execution: **Yes**
-- Requires `commit confirmed` on configuration changes: **Yes**
-
-## Traceability
-
-- Knowledge base: `kb/knowledge.db` (retrieved, not re-derived from raw RFC text)
-
-
-## Notes
-
-Only the origination sub-clause (a) is directly exercised by plain origination and is cleanly observable in Junos via as-path. The AS_SEQUENCE-vs-AS_SET distinction relies on Junos rendering AS_SET members in braces; segment-type verification is more rigorous at the wire level (ExaBGP receiver decoding path-segment type=2 vs type=1) if byte-accurate confirmation is needed. The >255 overflow and 'first segment is AS_SET' branches of this SHOULD are not covered here and would each need a separately crafted AS_PATH stimulus (a scripted peer feeding R1 a route with a near-255-AS or AS_SET-leading path, then observing re-advertisement).
-
-
-
---- same test's pytest / PyEZ stub tab ---
-"""
-Auto-generated pytest/PyEZ stub -- traced to RFC4271-S5.1.1-REQ-03
-RFC 4271 (A Border Gateway Protocol 4 (BGP-4)), Section 5.1.1 (ORIGIN)
-Generation mode: ai-high
-
-Requirement (SHOULD): If the act of prepending will cause an overflow in the AS_PATH segment (i.e., more than 255 ASes), it SHOULD prepend a new segment of type AS_SEQUENCE and prepend its own AS number to this new segment. 2) if the first path segment of the AS_PATH is of type AS_SET, the local system prepends a new path segment of type AS_SEQUENCE to the AS_PATH, including its own AS number in that segment. 3) if the AS_PATH is empty, the local system creates a path segment of type AS_SEQUENCE, places its own AS into that segment, and places that segment into the AS_PATH. When a BGP speaker originates a route then: a) the originating speaker includes its own AS number in a path segment, of type AS_SEQUENCE, in the AS_PATH attribute of all UPDATE messages sent to an external peer.
-
-Protocol reasoning: Per RFC 4271 5.1.1, when a BGP speaker originates a route and advertises it to an external (eBGP) peer, it must place its own AS number into an AS_SEQUENCE-type path segment of the AS_PATH attribute. A conformant Junos speaker in AS 65001 originating a prefix toward an eBGP peer in AS 65002 must therefore emit an AS_PATH consisting of a single AS_SEQUENCE segment containing only 65001, not an AS_SET and not an empty path. The overflow (>255) and AS_SET-first sub-clauses of this SHOULD are edge cases of the same prepend logic but are not exercised on plain origination.
-
-STATUS: lab-ready stub. Uses real PyEZ call patterns but device host/credentials
-are placeholders -- wire to your vJunos-router/vMX lab inventory before running.
-"""
-import pytest
-from jnpr.junos import Device
-from jnpr.junos.utils.config import Config
-
-
-REQUIREMENT_ID = "RFC4271-S5.1.1-REQ-03"
-TEST_TYPE = "positive"
-RISK = "medium"
-GENERATION_MODE = "ai-high"
-
-
-@pytest.fixture(scope="module")
-def r1():
-    dev = Device(host="R1_LAB_HOST", user="LAB_USER", password="LAB_PASSWORD", port=22)
-    dev.open()
-    yield dev
-    dev.close()
-
-
-@pytest.fixture(scope="module")
-def r2():
-    dev = Device(host="R2_LAB_HOST", user="LAB_USER", password="LAB_PASSWORD", port=22)
-    dev.open()
-    yield dev
-    dev.close()
-
-
-def test_rfc4271_s5_1_1_req_03(r1, r2):
-    """
-    Traces to: RFC4271-S5.1.1-REQ-03
-    If the act of prepending will cause an overflow in the AS_PATH segment (i.e., more than 255 ASes), it SHOULD prepend a new segment of type AS_SEQUENCE and prepend its own AS number to this new segment. 2) if the first path segment of the AS_PATH is of type AS_SET, the local system prepends a new path segment of type AS_SEQUENCE to the AS_PATH, including its own AS number in that segment. 3) if the AS_PATH is empty, the local system creates a path segment of type AS_SEQUENCE, places its own AS into that segment, and places that segment into the AS_PATH. When a BGP speaker originates a route then: a) the originating speaker includes its own AS number in a path segment, of type AS_SEQUENCE, in the AS_PATH attribute of all UPDATE messages sent to an external peer.
-
-    Reasoning: Per RFC 4271 5.1.1, when a BGP speaker originates a route and advertises it to an external (eBGP) peer, it must place its own AS number into an AS_SEQUENCE-type path segment of the AS_PATH attribute. A conformant Junos speaker in AS 65001 originating a prefix toward an eBGP peer in AS 65002 must therefore emit an AS_PATH consisting of a single AS_SEQUENCE segment containing only 65001, not an AS_SET and not an empty path. The overflow (>255) and AS_SET-first sub-clauses of this SHOULD are edge cases of the same prepend logic but are not exercised on plain origination.
-    """
-    with Config(r1, mode="exclusive") as cu:
-        cu.load(
-            '''
-protocols {
-    bgp {
-        group EBGP-PEER {
-            type external;
-            peer-as 65002;
-            neighbor R2_LAB_IP {
-                hold-time 90;
-            }
-        }
-    }
-}
-            ''',
-            format="text",
-        )
-        cu.commit(confirm=2)
-
-    # --- stimulus ---
-    # (positive-path stimulus -- standard peering brings this up naturally)
-
-    # --- observation ---
-    # PyEZ observation point (AI-suggested): rpc.get_route_information(destination='203.0.113.0/24', table='inet.0') on R2 -> .//rt-entry/as-path (text like '65001 I'); AS_SET would appear as '{...}' within that field
-    _info = r1.rpc.get_bgp_neighbor_information()
-    peer_state = _info.findtext(".//peer-state")
-
-    # --- assertion ---
-    # Expected: Pass iff the route received by R2 carries AS_PATH = a single AS_SEQUENCE segment equal to '65001' with no AS_SET component (Junos renders AS_SET members inside '{ }'); fail if the path is empty, the originating AS is absent, or 65001 appears only inside an AS_SET.
-    assert peer_state is not None, "Could not read peer_state via PyEZ RPC"
-    # AI-suggested assertion (high confidence, needs review before use):
-    # assert as_path.replace('I','').strip() == '65001' and '{' not in as_path
-    # TODO: replace with the precise assertion for this requirement
-
-
-$ python3 verify_generated_tests.py
-Checked 33 generated pytest file(s).
-All generated pytest stubs are syntactically valid.
-
----------------------------------------------------------------------
-STEP 5: prove later runs never re-touch the RFC text
----------------------------------------------------------------------
-$ curl /api/ingestion-log  (still exactly 1 RFC_INGESTED)
-1 RFC_INGESTED event(s) out of 3 total
-
-$ kill server; python app.py   (restart -- expect NO ingestion message)
-new server PID: 16089
-ready after 2s
+--- Step 6 (cont.): restart with no re-ingestion ---
  * Serving Flask app 'app'
  * Debug mode: off
 [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
@@ -294,289 +302,58 @@ ready after 2s
  * Running on http://127.0.0.1:5000
  * Running on http://172.19.75.135:5000
 [33mPress CTRL+C to quit[0m
-127.0.0.1 - - [13/Aug/2026 15:19:10] "GET /api/status HTTP/1.1" 200 -
+tests_generated: 33 overall_coverage_pct: 16.3
 
-$ curl /api/status  (confirm same data persisted)
-tests_generated: 33 | total_requirements: 203
+--- Step 6 (cont.): move raw RFC text out of the way, prove app still works ---
+artefacts
+knowledge.db
+retrieval_index.pkl
+uploaded_tests
 
-$ mv kb/rfc4271_raw.txt /tmp/rfc4271_raw.txt.bak  (optional bold proof)
-server PID (RFC file absent): 16481
-ready after 2s, WITHOUT rfc4271_raw.txt present
- * Serving Flask app 'app'
- * Debug mode: off
-[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
- * Running on all addresses (0.0.0.0)
- * Running on http://127.0.0.1:5000
- * Running on http://172.19.75.135:5000
-[33mPress CTRL+C to quit[0m
-127.0.0.1 - - [13/Aug/2026 15:29:36] "GET /api/status HTTP/1.1" 200 -
+--- Step 6 (cont.): generate one more test with raw RFC text moved aside ---
+{"batch_id":3,"created":["rfc4271_s6_2_req_06"],"dedup":{"duplicates_ignored":0,"total":34,"unique":34},"skipped_already_covered":[]}
 
-$ curl -X POST /api/generate-by-category -d '{"category":"error_handling","count":1}'  (generate with RFC file still absent)
-{"batch_id":3,"created":["rfc4271_s6_2_req_06"],"skipped_already_covered":[]}
+restoring rfc4271_raw.txt (needed for a future from-scratch bootstrap)
+artefacts
+knowledge.db
+retrieval_index.pkl
+rfc4271_raw.txt
+uploaded_tests
 
-$ mv /tmp/rfc4271_raw.txt.bak kb/rfc4271_raw.txt  (restored immediately)
+--- Step 7: ingest OSPF (RFC 2328), replacing the knowledge base ---
+{"requirement_count":10}
 
----------------------------------------------------------------------
-STEP 6: protocol-agnostic support -- ingest OSPF instead of BGP
----------------------------------------------------------------------
-$ POST /api/ingest {rfc_number: 2328, rfc_title: 'OSPF Version 2', protocol: '' (auto-detect)}
-200 {"requirement_count":10}
+--- Step 7 (cont.): confirm header/status flipped to OSPF ---
+{"ai":{"ai_available":true,"backend":"claude-code-cli","backend_mode_requested":"auto","mode":"ai","model":"claude-opus-4-8"},"coverage_summary":{"automatable_coverage_pct":0.0,"gap_count":10,"overall_coverage_pct":0.0,"tests_generated":0,"total_requirements":10},"rfc":{"id":1,"ingested_at":"2026-08-15T17:56:06","protocol_display_name":"OSPF (Open Shortest Path First)","protocol_key":"ospf","rfc_number":"2328","rfc_title":"OSPF Version 2","source":"user-pasted text (UI)"}}
 
+--- Step 7 (cont.): coverage matrix categories now OSPF-specific ---
+['covered_ids', 'requirements']
 
-$ curl /api/status  (header should now show OSPF)
-{
-    "ai": {
-        "ai_available": true,
-        "backend": "claude-code-cli",
-        "backend_mode_requested": "auto",
-        "mode": "ai",
-        "model": "claude-opus-4-8"
-    },
-    "coverage_summary": {
-        "automatable_coverage_pct": 0.0,
-        "gap_count": 10,
-        "overall_coverage_pct": 0.0,
-        "tests_generated": 0,
-        "total_requirements": 10
-    },
-    "rfc": {
-        "id": 1,
-        "ingested_at": "2026-08-13T15:33:38",
-        "protocol_display_name": "OSPF (Open Shortest Path First)",
-        "protocol_key": "ospf",
-        "rfc_number": "2328",
-        "rfc_title": "OSPF Version 2",
-        "source": "user-pasted text (UI)"
-    }
-}
+--- Step 7 (cont.): generate a test for the neighbor_adjacency category ---
+{"batch_id":1,"created":["rfc2328_s3_req_01"],"dedup":{"duplicates_ignored":0,"total":1,"unique":1},"skipped_already_covered":[]}
 
-$ curl /api/coverage  (category_breakdown should be OSPF categories)
-  lsa_flooding              4
-  neighbor_adjacency        3
-  spf_calculation           1
-  area_management           1
-  authentication            1
+--- Step 7 (cont.): inspect OSPF-generated test detail (protocol-specific rendering check) ---
+{"ai_backend":"claude-code-cli","batch_id":1,"category":"neighbor_adjacency","created_at":"2026-08-15T17:57:20","derived_from":"","doc_content":"# rfc2328_s3_req_01\n\n| Field | Value |\n|---|---|\n| RFC Reference | RFC2328-S3-REQ-01 \u2014 RFC 2328 (OSPF Version 2), \u00a73 (Interface Hello Protocol) |\n| Test Type | positive |\n| Category | neighbor_adjacency |\n| Risk | medium |\n| Priority | medium |\n| Generation Mode | ai-medium \u2014 \u26a0 **NEEDS ENGINEER REVIEW** |\n\n## Normative Statement\n\n> **MUST:** A router MUST send Hello packets out each OSPF-enabled interface at HelloInterval seconds.\n\n## Protocol Reasoning\n\nOSPF's Hello protocol requires each router to transmit a Hello packet out every enabled interface once per HelloInterval; these periodic Hellos are what establish and sustain neighbor relationships and reset the peer's RouterDeadInterval timer. If a Junos DUT (R1) is emitting Hellos at the correct cadence, its peer (R2) will progress and hold the adjacency at Full; a sustained Full state is indirect proof that Hellos are flowing continuously, but the exact inter-packet interval is only measurable on the wire.\n\n## Preconditions\n\n- **Topology:** two-router-single-area (R1 \u2194 R2, both in Area 0.0.0.0) \u2014 Default R1 (DUT) <-> R2, both Area 0.0.0.0. A passive Scapy sniffer on the shared link is needed to timestamp successive OSPF Hello packets from R1 and confirm the ~HelloInterval spacing, since PyEZ exposes no per-packet timing.\n- **Timers:** Hello Interval = 10, Dead Interval = 40, Retransmit Interval = 5\n- **Devices:** Juniper vJunos-router / vMX pair reachable via NETCONF (PyEZ)\n- **Requires peer emulator: Scapy** \u2014 Junos will not originate this condition on its own.\n\n## Test Steps\n\n1. Configure R1 and R2 in Area 0.0.0.0 on the shared interface with a known, matching hello-interval (e.g. 10s) and dead-interval, and let the adjacency form.\n2. On R1 (DUT), verify via PyEZ that the neighbor R2 reaches and remains in Full state, which requires R1 to be sending Hellos at HelloInterval.\n3. In parallel, run a Scapy sniffer on the segment to capture OSPF Hello packets sourced from R1 over ~3-4 intervals and assert the measured mean inter-Hello gap equals the configured HelloInterval within tolerance (external observation, not expressible via the allowed PyEZ points).\n\n## Expected Result\n\n1. The OSPF adjacency to R2 reaches Full state, confirming R1 is emitting Hellos regularly enough for the peer to complete and hold the adjacency (indirect proof Hellos are being sent at HelloInterval).\n2. A neighbor is actually present/identified (an adjacency exists to observe), so the Full-state check is meaningful rather than vacuously passing on an empty neighbor table.\n3. The exact inter-Hello transmission interval from R1 equals the configured HelloInterval (within tolerance), measured from Scapy wire captures of successive Hello packets. Not expressible through get_ospf_neighbor_information/get_ospf_database_information, so no PyEZ assertion is provided.\n\n**Observation point:** `rpc.get_ospf_neighbor_information() -> .//neighbor-state`\n\n**Additional observations captured:**\n- `neighbor_id` = `.//ospf-neighbor/neighbor-id` via the primary observation above\n\n## Safety\n\n- Lab-only execution: **Yes**\n- Requires `commit confirmed` on configuration changes: **Yes**\n\n## Traceability\n\n- Knowledge base: `kb/knowledge.db` (retrieved, not re-derived from raw RFC text)\n\n\n## Notes\n\nThe literal 'at HelloInterval seconds' timing requirement is only verifiable via packet capture (Scapy sniffer); the allowed PyEZ observation points (neighbor info, LSDB) cannot measure per-packet timing, so that check is documented but non-executable here. The PyEZ checks only prove Hellos are flowing (adjacency Full), not their precise cadence. Confidence is medium because the core normative timing fact depends on the external sniffer, not the automatically-fetched PyEZ data. get_ospf_interface_information (which would expose the configured hello-interval) is not in the allowed observation menu, so the configured value cannot be cross-checked here.\n\n","emulator_tool":"Scapy","generation_mode":"ai-medium","keyword":"MUST","needs_review":1,"priority":"medium","protocol_reasoning":"OSPF's Hello protocol requires each router to transmit a Hello packet out every enabled interface once per HelloInterval; these periodic Hellos are what establish and sustain neighbor relationships and reset the peer's RouterDeadInterval timer. If a Junos DUT (R1) is emitting Hellos at the correct cadence, its peer (R2) will progress and hold the adjacency at Full; a sustained Full state is indirect proof that Hellos are flowing continuously, but the exact inter-packet interval is only measurable on the wire.","pytest_content":"\"\"\"\nAuto-generated pytest/PyEZ stub -- traced to RFC2328-S3-REQ-01\nRFC 2328 (OSPF Version 2), Section 3 (Interface Hello Protocol)\nGeneration mode: ai-medium\n\nRequirement (MUST): A router MUST send Hello packets out each OSPF-enabled interface at HelloInterval seconds.\n\nProtocol reasoning: OSPF's Hello protocol requires each router to transmit a Hello packet out every enabled interface once per HelloInterval; these periodic Hellos are what establish and sustain neighbor relationships and reset the peer's RouterDeadInterval timer. If a Junos DUT (R1) is emitting Hellos at the correct cadence, its peer (R2) will progress and hold the adjacency at Full; a sustained Full state is indirect proof that Hellos are flowing continuously, but the exact inter-packet interval is only measurable on the wire.\n\nSTATUS: lab-ready stub. Uses real PyEZ call patterns but device host/credentials\nare placeholders -- wire to your vJunos-router/vMX lab inventory before running.\n\nREQUIRES PEER EMULATOR: Scapy -- Junos will not originate this condition on its own; this stub alone cannot exercise this requirement.\n\"\"\"\nimport pytest\nfrom jnpr.junos import Device\nfrom jnpr.junos.utils.config import Config\n\n\nREQUIREMENT_ID = \"RFC2328-S3-REQ-01\"\nTEST_TYPE = \"positive\"\nRISK = \"medium\"\nGENERATION_MODE = \"ai-medium\"\n\n\n@pytest.fixture(scope=\"module\")\ndef r1():\n    dev = Device(host=\"R1_LAB_HOST\", user=\"LAB_USER\", password=\"LAB_PASSWORD\", port=22)\n    dev.open()\n    yield dev\n    dev.close()\n\n\n@pytest.fixture(scope=\"module\")\ndef r2():\n    dev = Device(host=\"R2_LAB_HOST\", user=\"LAB_USER\", password=\"LAB_PASSWORD\", port=22)\n    dev.open()\n    yield dev\n    dev.close()\n\n\ndef test_rfc2328_s3_req_01(r1, r2):\n    \"\"\"\n    Traces to: RFC2328-S3-REQ-01\n    A router MUST send Hello packets out each OSPF-enabled interface at HelloInterval seconds.\n\n    Reasoning: OSPF's Hello protocol requires each router to transmit a Hello packet out every enabled interface once per HelloInterval; these periodic Hellos are what establish and sustain neighbor relationships and reset the peer's RouterDeadInterval timer. If a Junos DUT (R1) is emitting Hellos at the correct cadence, its peer (R2) will progress and hold the adjacency at Full; a sustained Full state is indirect proof that Hellos are flowing continuously, but the exact inter-packet interval is only measurable on the wire.\n    \"\"\"\n    with Config(r1, mode=\"exclusive\") as cu:\n        cu.load(\n            '''\nprotocols {\n    ospf {\n        area 0.0.0.0 {\n            interface ge-0/0/0.0 {\n                hello-interval 10;\n                dead-interval 40;\n            }\n        }\n    }\n}\n            ''',\n            format=\"text\",\n        )\n        cu.commit(confirm=2)\n\n    # --- stimulus ---\n    # NOTE: requires a peer emulator (Scapy) to construct this stimulus --\n    # PyEZ/Junos alone cannot originate a non-conformant message.\n    # TODO: send the crafted stimulus via Scapy here.\n\n    # --- observation ---\n    # PyEZ observation point (AI-suggested): rpc.get_ospf_neighbor_information() -> .//neighbor-state\n    _info = r1.rpc.get_ospf_neighbor_information()\n    neighbor_state = _info.findtext(\".//neighbor-state\")\n\n    # additional AI-requested observation(s)\n    neighbor_id = _info.findtext('.//ospf-neighbor/neighbor-id')\n\n    # --- assertion ---\n    # Expected checks:\n    #   1. The OSPF adjacency to R2 reaches Full state, confirming R1 is emitting Hellos regularly enough for the peer to complete and hold the adjacency (indirect proof Hellos are being sent at HelloInterval).\n    #   2. A neighbor is actually present/identified (an adjacency exists to observe), so the Full-state check is meaningful rather than vacuously passing on an empty neighbor table.\n    #   3. The exact inter-Hello transmission interval from R1 equals the configured HelloInterval (within tolerance), measured from Scapy wire captures of successive Hello packets. Not expressible through get_ospf_neighbor_information/get_ospf_database_information, so no PyEZ assertion is provided.\n    assert neighbor_state is not None, \"Could not read neighbor_state via PyEZ RPC\"\n    assert neighbor_state == 'Full', \"The OSPF adjacency to R2 reaches Full state, confirming R1 is emitting Hellos regularly enough for the peer to complete and hold the adjacency (indirect proof Hellos are being sent at HelloInterval). (medium confidence) -- verify against lab output\"\n    assert neighbor_id is not None and neighbor_id != '', \"A neighbor is actually present/identified (an adjacency exists to observe), so the Full-state check is meaningful rather than vacuously passing on an empty neighbor table. (medium confidence) -- verify against lab output\"\n    # TODO: The exact inter-Hello transmission interval from R1 equals the configured HelloInterval (within tolerance), measured from Scapy wire captures of successive Hello packets. Not expressible through get_ospf_neighbor_information/get_ospf_database_information, so no PyEZ assertion is provided.\n    # assert neighbor_state == \"<expected value for this check>\"\n","requirement_id":"RFC2328-S3-REQ-01","requires_peer_emulator":1,"risk":"medium","section_id":"3","section_title":"Interface Hello Protocol","statement":"A router MUST send Hello packets out each OSPF-enabled interface at HelloInterval seconds.","test_id":"rfc2328_s3_req_01","test_type":"positive","timers":"{\"hello_interval\": 10, \"dead_interval\": 40, \"retransmit_interval\": 5}","topology":"two-router-single-area"}
 
-$ curl -X POST /api/generate-by-category -d '{"category":"lsa_flooding","count":2}'
+--- Step 7 (cont.): confirmed OSPF-specific timers/config/observation-call/checks -- see values below ---
+timers: {"hello_interval": 10, "dead_interval": 40, "retransmit_interval": 5}
+config stanza: protocols { ospf { area 0.0.0.0 { interface ge-0/0/0.0 { hello-interval 10; dead-interval 40; } } } }
+observation call: rpc.get_ospf_neighbor_information() -> .//neighbor-state
 
-{"batch_id":1,"created":["rfc2328_s2_req_01","rfc2328_s2_req_02"],"skipped_already_covered":[]}
+--- Optional extension: run deduplicated tests again under OSPF ---
+{'total': 1, 'passed': 1, 'failed': 0, 'errored': 0, 'skipped': 0}
 
-$ curl /api/tests/rfc2328_s2_req_01  (doc: should show OSPF topology/timers/reasoning)
-generation_mode: ai-high | ai_backend: claude-code-cli
+--- Step 8: after-demo cleanup -- restore BGP state ---
+Stopped app.py
+Restored knowledge.db, retrieval_index.pkl, generated_tests/{docs,pytest}
 
-# rfc2328_s2_req_01
+--- Step 8 (cont.): confirm restore, rebuild deduplicated view from restored DB ---
+{'id': 1, 'rfc_number': '4271', 'rfc_title': 'A Border Gateway Protocol 4 (BGP-4)', 'source': 'kb/rfc4271_raw.txt (bundled seed)', 'ingested_at': '2026-08-13T15:36:06', 'protocol_key': 'bgp', 'protocol_display_name': 'BGP (Border Gateway Protocol)'}
+39 tests restored
+{'total': 39, 'unique': 39, 'duplicates_ignored': 0}
 
-| Field | Value |
-|---|---|
-| RFC Reference | RFC2328-S2-REQ-01 — RFC 2328 (OSPF Version 2), §2 (The Link-State Database) |
-| Test Type | positive |
-| Category | lsa_flooding |
-| Risk | high |
-| Priority | high |
-| Generation Mode | ai-high |
+--- Final cleanup ---
+Stopped app.py. Confirmed restored: 203 requirements, 39 tests, BGP 4271.
+Removed /tmp/poc_demo_backup and scratch files.
 
-## Normative Statement
-
-> **MUST:** Each router MUST originate a router-LSA describing its links.
-
-## Protocol Reasoning
-
-A router-LSA (Type-1 LSA) is the fundamental self-description each OSPF router injects into its area's link-state database, enumerating the router's interfaces (links), their types, neighbors/DR, and metrics. Once R1 and R2 form a Full adjacency in Area 0, each MUST originate exactly one router-LSA advertised under its own Router ID; without it, SPF cannot place the router in the shortest-path tree. This is native Junos behavior, so the device generates the LSA on its own once OSPF is enabled on an interface.
-
-## Preconditions
-
-- **Topology:** two-router-single-area (R1 ↔ R2, both in Area 0.0.0.0)
-- **Timers:** Hello Interval = 10, Dead Interval = 40, Retransmit Interval = 5
-- **Devices:** Juniper vJunos-router / vMX pair reachable via NETCONF (PyEZ)
-
-
-## Test Steps
-
-1. Configure OSPF Area 0.0.0.0 on the R1<->R2 link and let the adjacency reach Full state
-2. On R1, query the OSPF link-state database and filter for Router-type LSAs
-3. Confirm a Router-LSA exists whose advertising-router equals R2's configured Router ID and that it lists the link to R1
-
-## Expected Result
-
-PASS if the LSDB contains a Router (Type-1) LSA with advertising-router == R2's Router ID, and the LSA enumerates at least one link entry corresponding to the R1<->R2 adjacency; FAIL if no such router-LSA is present after the adjacency reaches Full.
-
-**Observation point:** `rpc.get_ospf_database_information() -> .//ospf-database[lsa-type='Router'][advertising-router='<R2_router_id>'] (verify ospf-router-lsa/ospf-link child elements are present)`
-
-## Safety
-
-- Lab-only execution: **Yes**
-- Requires `commit confirmed` on configuration changes: **Yes**
-
-## Traceability
-
-- Knowledge base: `kb/knowledge.db` (retrieved, not re-derived from raw RFC text)
-
-
-## Notes
-
-Router-LSA origination is native Junos behavior, so no scriptable peer is required. Verify against the correct area LSDB (Area 0). The exact XML nesting for link entries (ospf-router-lsa/ospf-link) and whether get_ospf_database_information exposes per-link detail without an 'extensive' flag may vary by Junos release; a 'detail'/'extensive' RPC argument may be needed to observe the link list. Router ID must be known/derived from get_ospf_overview_information() to bind the assertion.
-
-
-
---- same test's pytest stub: config stanza + observation call ---
-Traceback (most recent call last):
-  File "<string>", line 6, in <module>
-ValueError: substring not found
-"""
-Auto-generated pytest/PyEZ stub -- traced to RFC2328-S2-REQ-01
-RFC 2328 (OSPF Version 2), Section 2 (The Link-State Database)
-Generation mode: ai-high
-
-Requirement (MUST): Each router MUST originate a router-LSA describing its links.
-
-Protocol reasoning: A router-LSA (Type-1 LSA) is the fundamental self-description each OSPF router injects into its area's link-state database, enumerating the router's interfaces (links), their types, neighbors/DR, and metrics. Once R1 and R2 form a Full adjacency in Area 0, each MUST originate exactly one router-LSA advertised under its own Router ID; without it, SPF cannot place the router in the shortest-path tree. This is native Junos behavior, so the device generates the LSA on its own once OSPF is enabled on an interface.
-
-STATUS: lab-ready stub. Uses real PyEZ call patterns but device host/credentials
-are placeholders -- wire to your vJunos-router/vMX lab inventory before running.
-"""
-import pytest
-from jnpr.junos import Device
-from jnpr.junos.utils.config import Config
-
-
-REQUIREMENT_ID = "RFC2328-S2-REQ-01"
-TEST_TYPE = "positive"
-RISK = "high"
-GENERATION_MODE = "ai-high"
-
-
-@pytest.fixture(scope="module")
-def r1():
-    dev = Device(host="R1_LAB_HOST", user="LAB_USER", password="LAB_PASSWORD", port=22)
-    dev.open()
-    yield dev
-    dev.close()
-
-
-@pytest.fixture(scope="module")
-def r2():
-    dev = Device(host="R2_LAB_HOST", user="LAB_USER", password="LAB_PASSWORD", port=22)
-    dev.open()
-    yield dev
-    dev.close()
-
-
-def test_rfc2328_s2_req_01(r1, r2):
-    """
-    Traces to: RFC2328-S2-REQ-01
-    Each router MUST originate a router-LSA describing its links.
-
-    Reasoning: A router-LSA (Type-1 LSA) is the fundamental self-description each OSPF router injects into its area's link-state database, enumerating the router's interfaces (links), their types, neighbors/DR, and metrics. Once R1 and R2 form a Full adjacency in Area 0, each MUST originate exactly one router-LSA advertised under its own Router ID; without it, SPF cannot place the router in the shortest-path tree. This is native Junos behavior, so the device generates the LSA on its own once OSPF is enabled on an interface.
-    """
-    with Config(r1, mode="exclusive") as cu:
-        cu.load(
-            '''
-protocols {
-    ospf {
-        area 0.0.0.0 {
-            interface ge-0/0/0.0 {
-                hello-interval 10;
-                dead-interval 40;
-            }
-        }
-    }
-}
-            ''',
-            format="text",
-        )
-        cu.commit(confirm=2)
-
-    # --- stimulus ---
-    # (positive-path stimulus -- standard peering brings this up naturally)
-
-    # --- observation ---
-    # PyEZ observation point (AI-suggested): rpc.get_ospf_database_information() -> .//ospf-database[lsa-type='Router'][advertising-router='<R2_router_id>'] (verify ospf-router-lsa/ospf-link child elements are present)
-    _info = r1.rpc.get_ospf_neighbor_information()
-    neighbor_state = _info.findtext(".//neighbor-state")
-
-    # --- assertion ---
-    # Expected: PASS if the LSDB contains a Router (Type-1) LSA with advertising-router == R2's Router ID, and the LSA enumerates at least one link entry corresponding to the R1<->R2 adjacency; FAIL if no such router-LSA is present after the adjacency reaches Full.
-    assert neighbor_state is not None, "Could not read neighbor_state via PyEZ RPC"
-    # AI-suggested assertion (high confidence, needs review before use):
-    # assert any(lsa['lsa_type'] == 'Router' and lsa['advertising_router'] == r2_router_id and len(lsa['links']) >= 1 for lsa in ospf_database)
-    # TODO: replace with the precise assertion for this requirement
-
-
-$ python3 verify_generated_tests.py  (OSPF files)
-Checked 2 generated pytest file(s).
-All generated pytest stubs are syntactically valid.
-
----------------------------------------------------------------------
-STEP 7: cleanup -- restore to a clean BGP state
----------------------------------------------------------------------
-DEVIATION FROM demo_1.md's literal step 7: the script's documented
-restore rebuilds the *pre-demo* backup taken in step 1. In this run,
-step 1's backup captured a genuinely EMPTY state (that was the whole
-point of the requested cleanup -- wipe the 29 stale heuristic-fallback
-tests from before an AI backend existed). Restoring an empty backup
-would leave the app with 0 tests, not a clean BGP demo state. So
-instead: re-run the exact same fresh bootstrap as step 2 (delete DB,
-restart), which is proven (steps 2-5 above) to produce a genuinely
-clean, fully AI-generated BGP test set -- which is what 'cleanup
-generated_tests' actually means here.
-
-$ kill server; rm kb/knowledge.db kb/retrieval_index.pkl generated_tests/{docs,pytest}/*
-cleared. docs: 0, pytest: 0
-
-$ python app.py  (final clean bootstrap)
-No requirements in knowledge base yet -- ingesting bundled RFC 4271...
-Ingested 203 requirements.
-Generated seed demo package of 28 tests across 10 categories.
- * Serving Flask app 'app'
- * Debug mode: off
-[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
- * Running on all addresses (0.0.0.0)
- * Running on http://127.0.0.1:5000
- * Running on http://172.19.75.135:5000
-[33mPress CTRL+C to quit[0m
-
-$ curl /api/status  (final state)
-{
-    "ai": {
-        "ai_available": true,
-        "backend": "claude-code-cli",
-        "backend_mode_requested": "auto",
-        "mode": "ai",
-        "model": "claude-opus-4-8"
-    },
-    "coverage_summary": {
-        "automatable_coverage_pct": 14.3,
-        "gap_count": 168,
-        "overall_coverage_pct": 13.8,
-        "tests_generated": 28,
-        "total_requirements": 203
-    },
-    "rfc": {
-        "id": 1,
-        "ingested_at": "2026-08-13T15:36:06",
-        "protocol_display_name": "BGP (Border Gateway Protocol)",
-        "protocol_key": "bgp",
-        "rfc_number": "4271",
-        "rfc_title": "A Border Gateway Protocol 4 (BGP-4)",
-        "source": "kb/rfc4271_raw.txt (bundled seed)"
-    }
-}
-
-$ confirm generation_mode distribution -- should be ALL AI, zero heuristic
-ai-low 15
-ai-medium 12
-ai-high 1
-
-$ python3 verify_generated_tests.py  (final clean set)
-Checked 28 generated pytest file(s).
-All generated pytest stubs are syntactically valid.
-
-$ stop server, remove scratch/backup files
-server stopped, scratch/backup files removed
-
-======================================================================
-Run complete -- 2026-08-13 15:47:45 UTC
-Final state: RFC 4271 (BGP), 203 requirements, 28 tests, 0 heuristic-
-fallback (was 29/77 before this run). All pytest stubs syntactically
-valid. generated_tests/ folder is now clean.
-======================================================================
+=== demo_1.md end-to-end run finished at 2026-08-15T18:01:13Z ===
