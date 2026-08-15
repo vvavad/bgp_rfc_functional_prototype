@@ -72,21 +72,32 @@ doc/pytest text is produced.
   and cannot originate, which is exactly the gap the earlier heuristic
   version couldn't reason about at all
 - **Test Intent, not free-form code:** the model returns a structured JSON
-  object (test type, protocol reasoning, steps, exact PyEZ observation point,
-  a candidate assertion) — it never writes Python directly. The same
-  deterministic template renderer from before turns that JSON into doc +
-  pytest text, so nothing ships that skipped the "compiler" step
-- **Safety-gated assertion promotion:** any assertion the model suggests gets
+  object (test type, protocol reasoning, steps, exact PyEZ observation
+  point, a list of 1-4 independent `checks`) — it never writes Python
+  directly. The same deterministic template renderer from before turns
+  that JSON into doc + pytest text, so nothing ships that skipped the
+  "compiler" step
+- **Multiple checks per test, not one:** a Test Intent's `checks` field is a
+  list, not a single assertion — real requirements usually verify more than
+  one fact (session state *and* a specific field value *and*, where
+  relevant, an absence). Each check is graded and promoted **independently**,
+  so one check failing the safety gate below doesn't drag the rest down to
+  the old single generic base check. Regenerating a fresh batch after this
+  landed: 11/12 tests rendered 2+ real executable asserts, up from a prior
+  82%-of-tests-have-exactly-one-assert baseline
+- **Safety-gated assertion promotion:** each check's `assertion_code` gets
   promoted into an executable `assert` line as long as it passes a static
-  safety check — no imports, no arbitrary function calls, and every variable
-  name it references is guaranteed to actually exist in the rendered test
-  (either the one value fetched by default, or an additional named
-  observation the model explicitly declared and pipeline.py wired up —
-  see `backend/protocol_profiles.py`'s `secondary_observations`). Promotion
-  no longer depends on the model's self-reported confidence — a real,
+  safety check — no imports, no arbitrary function calls beyond a small
+  allowlist (`strip`/`lower`/`upper`/`findtext`/`get`/`split`/`count`/
+  `startswith`/`endswith`/`replace`), and every variable name it references
+  is guaranteed to actually exist in the rendered test (either the one
+  value fetched by default, or an additional named observation the model
+  explicitly declared and pipeline.py wired up — see
+  `backend/protocol_profiles.py`'s `secondary_observations`). Promotion no
+  longer depends on the model's self-reported confidence — a real,
   runnable check beats none — but confidence still independently flags the
-  test `needs_review` in the catalog, so a low-confidence assertion still
-  gets a second look even though it's guaranteed not to crash
+  test `needs_review` in the catalog, so a low-confidence test's checks
+  still get a second look even when they're guaranteed not to crash
 - **Graceful fallback:** no backend available (neither CLI nor API key), or a
   failed/malformed response from whichever one answered → generation still
   succeeds, just via the original heuristic templates, clearly labeled
@@ -193,10 +204,10 @@ dashboard; the same run is recorded in `backend/logs/generation.log`.
   pass/fail against the mock doesn't mean anything about real conformance
   for these specifically)
 - Confidence still drives the catalog's `needs_review` badge independently
-  of whether an assertion was safe enough to promote to executable — a
-  promoted, mock-passing assertion from a low-confidence Test Intent is
-  still flagged for a human to check the reasoning behind it; treat
-  `review` as a real signal, not decoration
+  of whether any given check's assertion was safe enough to promote to
+  executable — promoted, mock-passing assertions from a low-confidence Test
+  Intent are still flagged for a human to check the reasoning behind them;
+  treat `review` as a real signal, not decoration
 
 ## Architecture
 

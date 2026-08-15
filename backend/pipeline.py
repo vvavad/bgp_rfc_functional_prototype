@@ -701,7 +701,7 @@ DOC_TEMPLATE = """# {test_id}
 
 ## Expected Result
 
-{assertion_hint}
+{checks_doc_block}
 
 **Observation point:** `{pyez_observation}`
 {observations_doc_block}
@@ -781,9 +781,10 @@ def test_{test_id}(r1, r2):
     {result_var} = _info.findtext("{observation_field}")
 {extra_observations_block}
     # --- assertion ---
-    # Expected: {assertion_hint}
+    # Expected checks:
+{expected_checks_comment}
     assert {result_var} is not None, "Could not read {result_var} via PyEZ RPC"
-{assertion_block}
+{assertion_blocks}
 '''
 
 STEPS_BY_TYPE = {
@@ -831,8 +832,13 @@ def _render_extra_observations(observations: list, profile) -> str:
     lines = ["", "    # additional AI-requested observation(s)"]
     holder_var_by_source = {}
     for obs in observations:
+        # repr() (not manual "..." quoting) so an AI-supplied XPath
+        # containing a literal quote character (valid XPath syntax, e.g.
+        # an attribute-value predicate) still renders as a syntactically
+        # valid Python string literal instead of breaking the generated file.
+        xpath_literal = repr(obs["xpath"])
         if obs["source"] == "primary":
-            lines.append(f'    {obs["var_name"]} = _info.findtext("{obs["xpath"]}")')
+            lines.append(f'    {obs["var_name"]} = _info.findtext({xpath_literal})')
             continue
         source_key = obs["source"]
         holder_var = holder_var_by_source.get(source_key)
@@ -840,7 +846,7 @@ def _render_extra_observations(observations: list, profile) -> str:
             holder_var = f"_{source_key}"
             holder_var_by_source[source_key] = holder_var
             lines.append(f'    {holder_var} = r1.{profile.secondary_observations[source_key]}')
-        lines.append(f'    {obs["var_name"]} = {holder_var}.findtext("{obs["xpath"]}")')
+        lines.append(f'    {obs["var_name"]} = {holder_var}.findtext({xpath_literal})')
     return "\n".join(lines) + "\n"
 
 
@@ -855,6 +861,61 @@ def _render_observations_doc(observations: list, profile) -> str:
                         else f'`{obs["source"]}` ({profile.secondary_observations[obs["source"]]})')
         lines.append(f'- `{obs["var_name"]}` = `{obs["xpath"]}` via {source_desc}')
     return "\n".join(lines) + "\n"
+
+
+def _render_checks_doc(checks: list) -> str:
+    """Markdown-numbered list of each check's description, for the doc's
+    'Expected Result' section -- replaces the old single assertion_hint
+    line now that a test can carry more than one independently-graded
+    check (see ai_generation's 'checks' schema)."""
+    return "\n".join(f"{i+1}. {c['description']}" for i, c in enumerate(checks))
+
+
+def _render_checks_comment(checks: list) -> str:
+    """Same list, rendered as commented lines inside the generated pytest
+    stub, just above the executable assert block."""
+    return "\n".join(f"    #   {i+1}. {c['description'].replace(chr(10), ' ')}" for i, c in enumerate(checks))
+
+
+def _build_assertion_blocks(checks: list, confidence: str, result_var: str) -> str:
+    """One block per check: a promoted executable assert if that check's
+    assertion_code passed ai_generation._safe_assertion_expr, a commented
+    suggestion if it has code that failed safety, or a commented TODO if
+    the model left assertion_code empty. Each check is judged entirely on
+    its own -- one check failing safety no longer drags its siblings down
+    to a single generic base check, which is the direct fix for tests that
+    used to render just one assert regardless of how many facts the
+    requirement actually implied."""
+    blocks = []
+    for check in checks:
+        desc = check["description"].replace('"', "'").replace("\n", " ")
+        code = check.get("assertion_code", "")
+        if check.get("assertion_code_is_safe") and code:
+            blocks.append(f'    assert {code}, "{desc} ({confidence} confidence) -- verify against lab output"')
+        elif code:
+            blocks.append(f'    # AI-suggested assertion for "{desc}" ({confidence} confidence, needs review before use):\n'
+                           f'    # assert {code}\n'
+                           f'    # TODO: replace with the precise assertion for this check')
+        else:
+            blocks.append(f'    # TODO: {desc}\n'
+                           f'    # assert {result_var} == "<expected value for this check>"')
+    return "\n".join(blocks)
+
+
+def _same_section_siblings(req_dict: dict, exclude_ids: set, limit: int = 2) -> list:
+    """Plain-SQL sibling lookup (not semantic search) -- other requirements
+    extracted from the exact same RFC section as req_dict, so the model
+    sees the full local cluster of related MUST/SHOULD clauses in that
+    section, not just cross-similarity hits from semantic_search."""
+    conn = get_conn()
+    placeholders = ",".join("?" * len(exclude_ids))
+    rows = conn.execute(
+        f"SELECT * FROM requirements WHERE section_id=? AND requirement_id NOT IN ({placeholders}) "
+        f"ORDER BY requirement_id LIMIT ?",
+        (req_dict["section_id"], *exclude_ids, limit)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived_from: str, profile) -> dict:
@@ -877,8 +938,15 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         keyword = req_dict["keyword"]
 
         # Retrieval context: semantically related requirements from the SAME
-        # persisted knowledge base (hybrid retriever, semantic side).
-        related = [r for r in semantic_search(req_dict["statement"], k=4) if r["requirement_id"] != rid][:3]
+        # persisted knowledge base (hybrid retriever, semantic side), plus
+        # same-section siblings via plain SQL (structural side) -- gives the
+        # model the full local cluster of related MUST/SHOULD clauses in
+        # that section, not just cross-similarity hits, so it has more raw
+        # material to draw distinct checks from.
+        semantic_related = [r for r in semantic_search(req_dict["statement"], k=6) if r["requirement_id"] != rid][:4]
+        exclude_ids = {rid} | {r["requirement_id"] for r in semantic_related}
+        sibling_related = _same_section_siblings(req_dict, exclude_ids, limit=2)
+        related = (semantic_related + sibling_related)[:6]
 
         ai_intent, mode = ai_generation.generate_ai_test_intent(rfc_label, req_dict, related, profile, artefact_context)
         ai_backend = ai_generation.get_active_backend_key() if ai_intent else ""
@@ -889,21 +957,19 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             risk = ai_intent["risk"]
             protocol_reasoning = ai_intent["protocol_reasoning"]
             steps = ai_intent["steps"]
-            assertion_hint = ai_intent["assertion_hint"]
             pyez_observation = ai_intent["pyez_observation"]
             requires_emulator = bool(ai_intent["requires_peer_emulator"])
             emulator_tool = ai_intent.get("emulator_tool", "none")
             topology_note = ai_intent.get("topology_note", "")
             notes = ai_intent.get("notes", "")
             confidence = ai_intent["confidence"]
-            assertion_code = ai_intent.get("assertion_code", "")
-            # Promotion to an executable assert depends only on the safety
-            # check (AST allowlist + known-variable-names, see
-            # ai_generation._safe_assertion_expr) -- confidence no longer
-            # gates this; it still gates needs_review below, since a safe-
-            # to-run assertion can still be worth a second look if the
+            # Each check's promotion to an executable assert depends only on
+            # its own safety check (AST allowlist + known-variable-names,
+            # see ai_generation._safe_assertion_expr) -- confidence no
+            # longer gates this; it still gates needs_review below, since a
+            # safe-to-run assertion can still be worth a second look if the
             # model wasn't sure about it.
-            assertion_is_safe = ai_intent.get("assertion_code_is_safe", False)
+            checks = ai_intent.get("checks", [])
             observations = ai_intent.get("observations", [])
             needs_review = 0 if confidence == "high" else 1
         else:
@@ -920,8 +986,10 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             topology_note = ""
             notes = mode  # e.g. "heuristic-fallback:no-api-key"
             confidence = "n/a"
-            assertion_code = ""
-            assertion_is_safe = False
+            # Heuristic fallback keeps exactly one canned, unverified check
+            # -- still the weakest path by design, the whole point of
+            # needs_review.
+            checks = [{"description": assertion_hint, "assertion_code": "", "assertion_code_is_safe": False}]
             observations = []
             needs_review = 1
 
@@ -944,7 +1012,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             topology=profile.topology_key, topology_description=profile.topology_description,
             topology_note=topology_note_fmt, timers_line=profile.timers_line(timers),
             steps="\n".join(f"{i+1}. {s}" for i, s in enumerate(steps)),
-            assertion_hint=assertion_hint, pyez_observation=pyez_observation,
+            checks_doc_block=_render_checks_doc(checks), pyez_observation=pyez_observation,
             observations_doc_block=observations_doc_block,
             emulator_note=emulator_note, keyword=keyword, statement=req_dict["statement"],
             reuse_note=reuse_note, notes_block=notes_block, protocol_reasoning=protocol_reasoning,
@@ -953,15 +1021,6 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         emulator_warning = (f"\nREQUIRES PEER EMULATOR: {emulator_tool} -- Junos will not originate this "
                              f"condition on its own; this stub alone cannot exercise this requirement.\n"
                              if requires_emulator else "")
-        if assertion_is_safe and assertion_code:
-            assertion_block = f'    assert {assertion_code}, "AI-suggested assertion ({confidence} confidence) -- verify against lab output"'
-        elif assertion_code:
-            assertion_block = (f'    # AI-suggested assertion ({confidence} confidence, needs review before use):\n'
-                                f'    # assert {assertion_code}\n'
-                                f'    # TODO: replace with the precise assertion for this requirement')
-        else:
-            assertion_block = (f'    # TODO: replace with the precise assertion for this requirement\n'
-                                f'    # assert {profile.result_var} == "<expected value for this protocol/requirement>"')
 
         stimulus_block = (
             f"    # NOTE: requires a peer emulator ({emulator_tool}) to construct this stimulus --\n"
@@ -981,7 +1040,8 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             config_stanza=config_stanza, observation_call=profile.observation_call,
             observation_field=profile.observation_field, result_var=profile.result_var,
             extra_observations_block=extra_observations_block,
-            assertion_hint=assertion_hint, stimulus_block=stimulus_block, assertion_block=assertion_block,
+            expected_checks_comment=_render_checks_comment(checks), stimulus_block=stimulus_block,
+            assertion_blocks=_build_assertion_blocks(checks, confidence, profile.result_var),
         )
 
         return {

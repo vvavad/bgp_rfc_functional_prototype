@@ -15,14 +15,24 @@ reviewable, non-hallucinated boundary between "AI reasoning" and "executed
 code" -- if the model's JSON doesn't validate, generation falls back to the
 heuristic path rather than emitting untrusted code.
 
-Assertion promotion is gated on safety, not confidence: any assertion_code
-that passes _safe_assertion_expr (no imports/dangerous calls, and every
-name it references is guaranteed to exist -- see known_names) is promoted
-into an executable `assert` line regardless of confidence, so a real check
-runs instead of nothing. Confidence still drives needs_review in the
-catalog independently -- a safe-to-run assertion from a low-confidence
-Test Intent is still flagged for a human to double-check the reasoning
-behind it, even though the assertion itself is guaranteed not to crash.
+A Test Intent carries a LIST of independent "checks" (description +
+assertion_code), not a single assertion -- real conformance tests usually
+need to verify more than one fact (session state AND a specific attribute
+value AND the absence of some condition), and collapsing all of that into
+one combined boolean expression is exactly what made early tests feel
+"basic": most ended up with nothing but a generic state check because
+there was only ever one assertion slot to begin with. Each check is
+promoted to an executable `assert` line independently, gated on safety,
+not confidence: any check whose assertion_code passes
+_safe_assertion_expr (no imports/dangerous calls, and every name it
+references is guaranteed to exist -- see known_names) gets promoted,
+regardless of confidence, so a real check runs instead of nothing -- a
+check that fails validation stays a commented note while its sibling
+checks in the same test still run. Confidence still drives needs_review
+in the catalog independently of any of this -- a safe-to-run assertion
+from a low-confidence Test Intent is still flagged for a human to
+double-check the reasoning behind it, even though it's guaranteed not to
+crash.
 """
 import os
 import re
@@ -151,9 +161,12 @@ Think concretely about:
   topology, a route reflector) if the requirement genuinely needs it.
 - The precise PyEZ/NETCONF observation point: which RPC or config/operational data would show the result \
   (e.g. $observation_example, a specific XML element).
+- Whether the requirement implies MULTIPLE distinct, separately-verifiable facts (e.g. "the session \
+  stays Established AND the specific attribute value is correct AND some other condition is absent") \
+  rather than just one -- if so, that's several entries in "checks" below, not one combined condition.
 
-IMPORTANT -- what data is actually available when you write assertion_code:
-The generated test ALWAYS fetches one value for you automatically, before your assertion runs: \
+IMPORTANT -- what data is actually available when you write a check's assertion_code:
+The generated test ALWAYS fetches one value for you automatically, before your checks run: \
 $observation_example, stored in a Python variable called `$result_var`. That is the ONLY variable \
 that exists unless you declare more. If the requirement needs to inspect something else \
 (e.g. AS_PATH content, a specific route attribute, an LSA field) -- something $result_var alone \
@@ -161,10 +174,19 @@ can't show -- declare it in the "observations" array below instead of assuming a
 exists. Each entry names a NEW variable, picks where to get it from, and gives the XPath to extract:
   - "source": "primary" pulls from the response already fetched for $result_var (a different field of the same RPC reply) -- no extra network call.
   - "source": one of these additional trusted calls available for this protocol -- $secondary_menu -- issues that call once and extracts your XPath from its response.
-Declare at most 3 observations. assertion_code may ONLY reference `$result_var` and the variable \
-names you declare in "observations" -- nothing else. If you can't express the real check using \
-$result_var plus at most 3 declared observations, leave assertion_code as an empty string and \
-explain why in "notes" rather than inventing a variable that will never exist.
+Declare at most 3 observations, shared across all your checks. Each check's assertion_code may ONLY \
+reference `$result_var` and the variable names you declare in "observations" -- nothing else. If a \
+specific check can't be expressed that way, leave that check's assertion_code as an empty string and \
+say why in "notes" rather than inventing a variable that will never exist -- its description still \
+stands as a documented, human-reviewable check even without executable code.
+
+IMPORTANT -- "checks" is a LIST, not one combined assertion:
+Prefer several small, independently-checkable conditions over one large ANDed boolean expression --
+e.g. a session/adjacency-state check, a specific-field-value check, and (where the requirement implies
+it) a negative/absence check, each as ITS OWN entry. Each is graded and promoted independently, so if
+one can't be safely expressed the others still run. Declare at least 1 and at most 4 checks -- a
+single well-justified check is completely fine for a genuinely simple requirement; don't pad with
+redundant or trivial checks just to reach 4.
 
 Respond with ONLY a single JSON object, no prose, no markdown fences, matching exactly this schema:
 {
@@ -176,12 +198,14 @@ Respond with ONLY a single JSON object, no prose, no markdown fences, matching e
   "emulator_tool": $emulator_tool_enum,
   "topology_note": "short note on topology if it differs from the default, else empty string",
   "steps": ["specific step 1", "specific step 2", "specific step 3 (optional)"],
-  "assertion_hint": "precise, specific description of the pass/fail condition",
   "pyez_observation": "the specific PyEZ RPC call or XML field to inspect, e.g. $observation_example",
   "observations": [
     {"var_name": "snake_case_identifier", "source": "primary" or a key from the menu above, "xpath": "XPath string to extract with .findtext()"}
   ],
-  "assertion_code": "a single Python boolean expression referencing ONLY $result_var and/or your declared observations[].var_name (no imports, no function calls beyond simple attribute/dict access) -- empty string if no such expression is possible",
+  "checks": [
+    {"description": "precise, specific description of what this ONE check verifies",
+     "assertion_code": "a single Python boolean expression referencing ONLY $result_var and/or your declared observations[].var_name (no imports, no function calls beyond simple attribute/dict access) -- empty string if no such expression is safely possible"}
+  ],
   "notes": "any caveats, edge cases, or reasons for lower confidence"
 }
 
@@ -247,14 +271,15 @@ def _strip_fences(text: str) -> str:
 
 
 REQUIRED_KEYS = {"test_type", "risk", "confidence", "protocol_reasoning", "requires_peer_emulator",
-                 "emulator_tool", "topology_note", "steps", "assertion_hint", "pyez_observation",
-                 "assertion_code", "notes"}
+                 "emulator_tool", "topology_note", "steps", "pyez_observation",
+                 "checks", "notes"}
 
 # "observations" is deliberately NOT in REQUIRED_KEYS -- it's new and optional
 # so a response that omits it entirely (rather than sending an empty list)
 # still validates; _validate_and_filter_observations treats a missing/
 # malformed value as "no extra observations" rather than failing the intent.
 MAX_OBSERVATIONS = 3
+MAX_CHECKS = 4
 _VALID_IDENTIFIER_RE = re.compile(r'^[a-z_][a-z0-9_]*$')
 _RESERVED_VAR_NAMES = {"_info", "r1", "r2", "cu", "dev", "pytest", "Device", "Config",
                         "len", "str", "int", "None", "True", "False"}
@@ -293,6 +318,30 @@ def _validate_and_filter_observations(observations_raw, profile) -> list:
     return out
 
 
+def _validate_and_filter_checks(checks_raw) -> list:
+    """Keeps only well-formed check entries: a non-empty string
+    "description" and a string "assertion_code" (may be empty -- that's a
+    documented-but-not-executable check, still valuable). Drops malformed
+    entries individually rather than failing the whole intent, and caps at
+    MAX_CHECKS. Safety validation of assertion_code happens later, per
+    check, in generate_ai_test_intent -- this function only enforces shape."""
+    if not isinstance(checks_raw, list):
+        return []
+    out = []
+    for item in checks_raw:
+        if len(out) >= MAX_CHECKS:
+            break
+        if not isinstance(item, dict):
+            continue
+        description, assertion_code = item.get("description"), item.get("assertion_code", "")
+        if not isinstance(description, str) or not description.strip():
+            continue
+        if not isinstance(assertion_code, str):
+            assertion_code = ""
+        out.append({"description": description.strip(), "assertion_code": assertion_code})
+    return out
+
+
 def _validate_intent(obj: dict, profile) -> bool:
     if not REQUIRED_KEYS.issubset(obj.keys()):
         return False
@@ -307,6 +356,9 @@ def _validate_intent(obj: dict, profile) -> bool:
     # Filter in place -- pipeline.py and _safe_assertion_expr both read
     # obj["observations"] afterward and expect it to already be validated.
     obj["observations"] = _validate_and_filter_observations(obj.get("observations", []), profile)
+    obj["checks"] = _validate_and_filter_checks(obj.get("checks", []))
+    if not obj["checks"]:
+        return False
     return True
 
 
@@ -334,7 +386,8 @@ def _safe_assertion_expr(code: str, known_names: set) -> bool:
         if isinstance(node, ast.Call):
             # allow only simple calls like str.strip(), .lower(), len(), no arbitrary names
             if isinstance(node.func, ast.Attribute):
-                if node.func.attr not in ("strip", "lower", "upper", "findtext", "get"):
+                if node.func.attr not in ("strip", "lower", "upper", "findtext", "get",
+                                           "split", "count", "startswith", "endswith", "replace"):
                     return False
             elif isinstance(node.func, ast.Name):
                 if node.func.id not in _ALLOWED_BUILTIN_NAMES:
@@ -376,7 +429,8 @@ def generate_ai_test_intent(rfc_label: str, req_row: dict, related: list, profil
         return None, "heuristic-fallback:invalid-schema"
 
     known_names = {profile.result_var} | {o["var_name"] for o in obj["observations"]}
-    obj["assertion_code_is_safe"] = _safe_assertion_expr(obj.get("assertion_code", ""), known_names)
+    for check in obj["checks"]:
+        check["assertion_code_is_safe"] = _safe_assertion_expr(check["assertion_code"], known_names)
     return obj, f"ai-{obj['confidence']}"
 
 

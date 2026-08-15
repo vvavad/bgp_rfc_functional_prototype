@@ -112,20 +112,45 @@ a team's real test isn't double-counted.
   to whichever backend answers (CLI accepts the same aliases/full names).
 - **Design rule that matters:** the model never writes Python. It returns a
   schema-validated JSON "Test Intent" (test type, risk, protocol reasoning,
-  steps, assertion hint, PyEZ observation point, a candidate `assertion_code`
-  expression). `pipeline.py`'s string templates are the only thing that
-  produce doc/pytest text — this keeps "AI reasoning" and "executed code"
-  separated by a validated boundary.
+  steps, PyEZ observation point, and a `checks` list — see below).
+  `pipeline.py`'s string templates are the only thing that produce
+  doc/pytest text — this keeps "AI reasoning" and "executed code" separated
+  by a validated boundary.
+- **`checks` schema field (Test Intent) — multiple independent assertions
+  per test:** a Test Intent carries a *list* of 1-4 `{description,
+  assertion_code}` checks instead of a single assertion. Each check is
+  promoted to an executable `assert` line **independently**, gated on
+  safety only (see `_safe_assertion_expr` below), not confidence — a check
+  that fails validation stays a commented TODO while its sibling checks in
+  the same test still run. This replaced an earlier one-slot design where a
+  test could structurally have at most 2 asserts total (an always-present
+  base sanity check + one AI-suggested one); root-caused against the live
+  catalog at the time, 32/39 (82%) generated tests had exactly one `assert`
+  statement. Verified the fix by regenerating a fresh batch through the
+  real CLI backend: 11/12 tests rendered 2+ real executable asserts (assert
+  counts of `{2: 6, 3: 5, 1: 1}` across 12 files), zero referencing an
+  undefined name. The one remaining single-assert case was a genuinely
+  unassertable MAY-level requirement (no protocol-observable behavior),
+  documented as such in its own check rather than padded out.
 - `_safe_assertion_expr(code, known_names)` is a narrow AST allowlist (no
-  imports, no calls beyond a handful of safe attribute methods, **and every
-  `ast.Name` reference must be in `known_names`**) that decides whether a
-  suggested assertion gets promoted to an executable `assert` line or stays a
-  commented TODO. `known_names` is `{profile.result_var}` plus any variable
-  the model declared via the `observations` schema field (see below) —
-  promotion is gated on safety only, **not confidence**; a safe assertion
-  from a low-confidence Test Intent still gets promoted, it just also keeps
-  `needs_review=1` so a human double-checks the reasoning behind it
-  independently of whether it's guaranteed to run without crashing.
+  imports, no calls beyond a handful of safe attribute methods — `strip`,
+  `lower`, `upper`, `findtext`, `get`, `split`, `count`, `startswith`,
+  `endswith`, `replace` — **and every `ast.Name` reference must be in
+  `known_names`**) that decides whether a suggested assertion gets promoted
+  to an executable `assert` line or stays a commented TODO. Runs once per
+  check now, not once per test. `known_names` is `{profile.result_var}`
+  plus any variable the model declared via the `observations` schema field
+  (see below) — promotion is gated on safety only, **not confidence**; a
+  safe assertion from a low-confidence Test Intent still gets promoted, it
+  just also keeps `needs_review=1` so a human double-checks the reasoning
+  behind it independently of whether it's guaranteed to run without
+  crashing.
+- **Deeper retrieval context per requirement:** `_generate_one` widened its
+  `semantic_search` call (k=4→6, top 4 kept) and added a same-`section_id`
+  sibling lookup (`pipeline._same_section_siblings`, a plain SQL query, not
+  a retrieval call) so the model sees the full local cluster of related
+  MUST/SHOULD clauses in that RFC section, not just cross-similarity hits —
+  more raw material to draw distinct checks from.
 - **`observations` schema field (Test Intent):** the model can declare up to
   3 named data fetches — `{var_name, source, xpath}` — instead of only ever
   getting the one value auto-fetched via the profile's `observation_call`/
