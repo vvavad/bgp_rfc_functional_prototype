@@ -6,6 +6,7 @@ Run with:
     python app.py
 Then open http://localhost:5000
 """
+import os
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -107,6 +108,14 @@ def api_ingestion_log():
     return jsonify(pipeline.get_ingestion_log())
 
 
+@app.get("/api/knowledge-library")
+def api_knowledge_library():
+    """Lists every file in backend/kb/rfc_library/ with its ingested/
+    not-ingested status -- knowledge kept as plain files separate from code,
+    selectable for ingestion rather than requiring a paste/upload each time."""
+    return jsonify(pipeline.get_knowledge_library())
+
+
 @app.get("/api/artefacts")
 def api_artefacts():
     return jsonify(pipeline.get_artefacts())
@@ -204,6 +213,20 @@ def api_ingest_upload():
     return jsonify(result)
 
 
+@app.post("/api/knowledge-library/<path:filename>/ingest")
+def api_knowledge_library_ingest(filename):
+    """Additive ingest of one file from the knowledge library: merges its
+    requirements into the current knowledge base (never deletes existing
+    requirements/tests, unlike /api/ingest) and flags any existing test
+    whose retrieval context now includes newly-added knowledge as
+    context_stale, for the next /api/generate-all call to regenerate."""
+    try:
+        result = pipeline.ingest_library_file(filename)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(result)
+
+
 @app.post("/api/artefacts/upload")
 def api_artefacts_upload():
     """Upload a product spec or other supporting artefact (.txt/.md/.pdf).
@@ -267,11 +290,17 @@ def api_existing_tests_delete(uploaded_test_id):
 
 if __name__ == "__main__":
     # Bootstrap: if the DB has no requirements yet, ingest the bundled RFC 4271
-    # text once so the app starts with a working demo state.
+    # text once so the app starts with a working demo state. SKIP_SEED_BOOTSTRAP
+    # opts out of this -- needed for the knowledge-library incremental-ingest
+    # demo (see Makefile's `run-empty`/`demo-incremental` targets), which
+    # wants to start from a genuinely empty knowledge base and drive every
+    # ingest itself through /api/knowledge-library; without this escape
+    # hatch this bootstrap would always beat it to fully populating RFC 4271
+    # via the destructive replace path before the demo's first library call.
     conn = pipeline.get_conn()
     count = conn.execute("SELECT COUNT(*) AS n FROM requirements").fetchone()["n"]
     conn.close()
-    if count == 0:
+    if count == 0 and not os.environ.get("SKIP_SEED_BOOTSTRAP"):
         raw = (Path(__file__).resolve().parent / "kb" / "rfc4271_raw.txt").read_text(encoding="utf-8", errors="ignore")
         print("No requirements in knowledge base yet -- ingesting bundled RFC 4271...")
         res = pipeline.ingest_rfc("4271", "A Border Gateway Protocol 4 (BGP-4)", raw,

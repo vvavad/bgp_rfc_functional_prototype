@@ -14,6 +14,116 @@ with Claude doing the "what test proves this requirement" reasoning. Currently
 hard-wired to BGP (RFC 4271) end to end — requirement classification,
 generation templates, and the AI system prompt all assume BGP.
 
+## What this POC demonstrates and is capable of
+
+A director-level summary — see "What's real vs. stubbed" near the end of this
+document for the full technical detail behind each line.
+
+- **Turns an RFC into a traceable requirement catalog automatically.**
+  Uploads or library-selected RFC text get parsed into individually
+  identified, individually testable normative statements (`RFC4271-S6.3-
+  REQ-42`-style IDs), each carrying its RFC-2119 keyword (MUST/SHOULD/MAY/…),
+  a heuristically-assigned category, and whether it's independently
+  observable via PyEZ at all.
+- **Reasons about each requirement with an LLM, not a template.** Claude (via
+  either a local Claude Code CLI login or an API key — see "Key management")
+  is given the requirement plus retrieved related context and returns a
+  structured, schema-validated Test Intent — never free-form code. Every
+  generated test is traceable back to the exact requirement, section, and
+  retrieval context that produced it.
+- **Adds knowledge incrementally, without losing prior work.** RFC source
+  files live in a small library (`backend/kb/rfc_library/`), separate from
+  the application code, selectable and ingestable one at a time via an API.
+  Ingesting a second file **adds** to the knowledge base rather than
+  replacing it — existing requirements and already-generated tests survive.
+  If newly-added knowledge changes what an *existing* test's reasoning
+  should have seen, that test is flagged and regenerated the next time tests
+  are generated — the catalog visibly reports both **new** tests and
+  **modified** ones, not just a bigger total.
+- **Computes coverage and gaps live, always from the database** — never a
+  cached or stale number — and cross-checks remaining gaps against a team's
+  own uploaded existing tests (also AI-reviewed) so a gap already covered
+  isn't double-counted.
+- **Actually runs the generated tests**, for real, via `pytest` against a
+  mocked PyEZ layer — not just generates text and calls it done.
+- **Is protocol-agnostic in practice, not just in name** — BGP (RFC 4271) and
+  OSPF (RFC 2328) both run through the identical pipeline via a
+  per-protocol profile, with a generic fallback for anything unrecognized.
+- **Runs its AI reasoning step key-less inside Claude Code** — no separate
+  `ANTHROPIC_API_KEY` needs to be provisioned to demo real LLM reasoning, and
+  every generated test records which backend (or heuristic fallback)
+  actually produced it.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph Client
+        FE["frontend/ (static HTML/JS/CSS)\nfetch() against /api/*"]
+    end
+
+    subgraph Server["backend/ (Flask)"]
+        APP["app.py\nroutes only"]
+        PIPE["pipeline.py\nparsing · retrieval · generation\norchestration · coverage/gap logic"]
+        AIGEN["ai_generation.py\nsystem prompts · schema validation\nassertion-code safety allowlist"]
+        BACKENDS["ai_backends.py\nClaudeCodeCLIBackend / AnthropicAPIBackend"]
+        PROFILES["protocol_profiles.py\nBGP / OSPF / generic"]
+    end
+
+    subgraph Storage["Persisted state"]
+        DB[("kb/knowledge.db\nrequirements · test_intents\nknowledge_sources · ingestion_log")]
+        IDX[("kb/retrieval_index.pkl\nTF-IDF vectorizer + matrix")]
+        LIB[("kb/rfc_library/*.txt\ncommitted source files")]
+        OUT[("generated_tests/\ndocs · pytest · deduplicated")]
+    end
+
+    subgraph AI["AI reasoning (pluggable)"]
+        CLI["Claude Code CLI\n(no API key needed)"]
+        API["Anthropic API\n(ANTHROPIC_API_KEY)"]
+        HEUR["Heuristic templates\n(no AI available)"]
+    end
+
+    subgraph Execution
+        PYTEST["pytest subprocess"]
+        MOCK["pyez/mock_device.py\nMockJunosDevice / MockConfig"]
+    end
+
+    FE -->|fetch /api/*| APP --> PIPE
+    PIPE --> AIGEN --> BACKENDS
+    BACKENDS --> CLI
+    BACKENDS --> API
+    AIGEN -.fallback.-> HEUR
+    PIPE --> PROFILES
+    PIPE <--> DB
+    PIPE <--> IDX
+    PIPE -->|read on ingest| LIB
+    PIPE --> OUT
+    OUT --> PYTEST --> MOCK
+```
+
+**Incremental knowledge-library ingestion** (see the dedicated section below
+for the mechanism):
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator (UI / make demo-incremental)
+    participant API as Flask API
+    participant DB as kb/knowledge.db
+
+    Op->>API: POST /knowledge-library/part1.txt/ingest
+    API->>DB: merge new requirements (additive, nothing deleted)
+    Note over DB: no existing tests to flag yet
+    Op->>API: POST /generate-all
+    API->>DB: create tests for new gaps
+    Op->>API: POST /knowledge-library/part2.txt/ingest
+    API->>DB: merge more new requirements (additive)
+    API->>DB: flag existing tests whose retrieval context now includes new knowledge (context_stale=1)
+    Op->>API: POST /generate-all (again)
+    API->>DB: create tests for newly-opened gaps
+    API->>DB: regenerate context_stale tests in place
+    API-->>Op: {created: [...], modified: [...]}
+```
+
 ## Runtime shape
 
 ```
@@ -55,7 +165,10 @@ Every subsequent read/generate call only touches `kb/knowledge.db` — this
 - `test_intents` — the generated test catalog: everything about a test
   (type/risk/priority, rendered doc + pytest text, `generation_mode` —
   `ai-high`/`ai-medium`/`ai-low`/`heuristic-fallback:<reason>` —
-  `needs_review`, `requires_peer_emulator`, `emulator_tool`).
+  `needs_review`, `requires_peer_emulator`, `emulator_tool`), plus
+  `context_requirement_ids` (the retrieval context actually used when this
+  test was last generated), `context_stale`/`context_stale_reason`, and
+  `updated_at` — see "Incremental knowledge-library ingestion" below.
 - `ingestion_log` — append-only activity feed (drives the Knowledge Base tab
   timeline).
 - `artefacts` — uploaded product specs / reference docs, extracted text
@@ -64,6 +177,10 @@ Every subsequent read/generate call only touches `kb/knowledge.db` — this
 - `uploaded_tests` / `uploaded_test_requirement_map` — a team's existing test
   suite, uploaded and AI-reviewed against candidate requirements so real gaps
   can be told apart from already-covered ones.
+- `knowledge_sources` — one row per knowledge-library file that has been
+  ingested at least once (filename, resolved RFC/protocol, when, how many
+  requirements it added) — powers `GET /api/knowledge-library`'s
+  ingested/not-ingested status.
 
 ## Pipeline stages
 
@@ -316,6 +433,80 @@ that `generate_tests`'s per-requirement loop was fully sequential, making a
   coverage** (up from 28 tests / ~14%), 119 gaps remaining — bulk-filling
   the rest is a deliberate on-demand action before a demo, not part of
   every fresh install's bootstrap (kept the existing fast-startup seed).
+
+## Incremental knowledge-library ingestion
+
+`ingest_rfc()` above is a **destructive replace**: every call wipes
+`requirements`/`requirement_status`/`test_intents`/`rfc_meta` and starts over
+— by design, so the paste/upload "replace the knowledge base" UI flow keeps
+meaning exactly that. It cannot demonstrate "add more knowledge without
+losing existing tests," so it isn't reused for that; a separate, additive
+function exists alongside it instead.
+
+- **`backend/kb/rfc_library/`** — a small folder of committed source `.txt`
+  files (same category as `kb/rfc4271_raw.txt`, not gitignored runtime
+  output), each prefixed with a tiny `RFC_NUMBER:`/`RFC_TITLE:`/`PROTOCOL:`
+  header followed by a `---` divider, then the raw RFC text
+  (`pipeline._parse_library_file`). Ships two demo files today: RFC 4271
+  split at the §6.3/§6.4 boundary (a natural near-50/50 cut verified against
+  the real parser — 107 requirements in sections 1–6.3, 96 in 6.4–10).
+- **`pipeline.ingest_rfc_incremental(filename, raw_text, source_label)`** —
+  the additive counterpart. Extraction itself is shared code
+  (`_extract_requirements`, factored out of `ingest_rfc` so both paths parse
+  identically), but the per-section requirement-id counters are *seeded from
+  what's already in the DB* rather than starting at zero, and only
+  requirement_ids not already present get inserted — existing requirements,
+  tests, and generated files are never touched. Guards against merging two
+  different RFCs into one flat knowledge base (raises, tells the caller to
+  use the replace path or reset first) and against a filename that's already
+  been ingested being re-processed (idempotent no-op via the
+  `knowledge_sources` table — see below for why this matters).
+- **"Modified tests" mechanism — `context_stale`:** every generated test now
+  stores `context_requirement_ids`, the exact set of requirement IDs that
+  were in its retrieval context at generation time (the same
+  `_retrieval_context_for` helper `_generate_one` already used, factored out
+  so both agree on the definition of "this test's context" — 6 nearest
+  TF-IDF neighbors + same-section siblings). After an incremental ingest
+  rebuilds the retrieval index, `_flag_context_stale_tests` recomputes that
+  context for every existing test; if a newly-added requirement now appears
+  in it, the test is flagged `context_stale=1` with a human-readable
+  `context_stale_reason`. This is a real signal, not a guess — TF-IDF
+  neighbor sets genuinely shift as the corpus grows, and it works whether or
+  not the ingested split happens to share a section (the demo split
+  deliberately doesn't: verified live, ingesting RFC 4271's second half
+  flagged **37 of 102** existing tests stale via cross-section semantic
+  similarity alone).
+- **`pipeline.regenerate_stale_tests()`** — reuses `_generate_one` (no
+  separate rendering path) to regenerate every `context_stale=1` test in
+  place: same `test_id`/`requirement_id`, overwritten doc/pytest files and
+  `test_intents` row (`UPDATE`, not a new row), `updated_at` stamped,
+  `context_stale` cleared. `generate_all_gaps()` (and so `POST
+  /api/generate-all`) now runs this as a second pass after its existing
+  gap-fill, so one "generate tests" action reports both `created` and
+  `modified` — the "few tests modified because of new knowledge" half of the
+  demo, alongside the "new tests created" half.
+- **Bootstrap conflict, found by actually running this end to end (not just
+  reading the diff):** `app.py`'s existing first-run bootstrap ingests the
+  *entire* bundled `kb/rfc4271_raw.txt` via the destructive `ingest_rfc()`
+  path the moment the DB is empty — which pre-empts the incremental demo
+  before it can run a single library call. Fixed with a `SKIP_SEED_BOOTSTRAP`
+  env var escape hatch (`Makefile`'s `run-empty` target) rather than
+  removing the bootstrap, since `make run`'s normal "seeds itself on first
+  launch" behavior is relied on elsewhere and shouldn't change.
+- **API**: `GET /api/knowledge-library` (file list + ingested status, scans
+  the folder fresh and left-joins `knowledge_sources` in Python), `POST
+  /api/knowledge-library/<filename>/ingest` (path-traversal-checked against
+  `RFC_LIBRARY_DIR` before reading). **UI**: a "Knowledge library" panel in
+  the Knowledge Base tab, and a "modified" pill on any test catalog row with
+  a non-empty `updated_at`.
+- **Verified live** (see `Makefile`'s `demo-incremental` target): starting
+  from an empty knowledge base, ingesting part 1 then generating produced
+  102 tests from 107 requirements (5 not independently observable);
+  ingesting part 2 added 96 requirements and flagged 37 existing tests
+  stale; generating again produced 94 newly-created tests **and** correctly
+  regenerated all 37 flagged ones, landing at 196 tests / 100% automatable
+  coverage across the full 203-requirement RFC — with zero `ast.parse`
+  failures and a clean mocked-`pytest` run afterward.
 
 ## Deduplication (`pipeline.refresh_deduplicated_tests`)
 

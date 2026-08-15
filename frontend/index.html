@@ -164,6 +164,15 @@
     </div>
 
     <div class="panel section-gap">
+      <h2>Knowledge library</h2>
+      <div class="desc">Source files kept separate from the app code, in <code>backend/kb/rfc_library/</code>. Ingesting one here <strong>adds</strong> its requirements to the current knowledge base — unlike the paste/upload form below, it never deletes existing requirements or generated tests. If new knowledge lands in a section an existing test already covers, that test is flagged for a refresh and picked up the next time you generate tests.</div>
+      <table class="data" id="libraryTable">
+        <thead><tr><th>Filename</th><th>RFC</th><th>Requirements added</th><th>Ingested</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel section-gap">
       <h2>Ingest a different RFC</h2>
       <div class="desc">Replaces the current knowledge base and clears previously generated tests. This is the only action that reads raw RFC text — everything else in this app reads from the database it produces.</div>
       <div class="filter-row">

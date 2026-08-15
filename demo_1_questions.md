@@ -235,10 +235,25 @@ uploaded artefacts/existing tests, and RFC metadata including which
 protocol profile is active.
 
 **Q: Does re-ingesting a new RFC merge with the old one, or replace it?**
-Replaces it entirely — re-ingestion clears the current requirements, all
+Depends which path you use, deliberately. The paste/upload form ("Ingest a
+different RFC") replaces it entirely — clears current requirements, all
 generated tests, and the generated test files on disk, then rebuilds from
-the new text. That's a deliberate destructive operation, gated behind a
-confirmation dialog in the UI.
+the new text, gated behind a confirmation dialog. The Knowledge Library
+panel is the other path: ingesting a file there is additive — it merges new
+requirements into the current knowledge base and never deletes existing
+requirements or tests. Replace is for swapping to a different RFC/protocol;
+additive is for growing knowledge of the same one incrementally.
+
+**Q: If I add more RFC text later, do the tests I already generated just
+sit there unchanged, even if the new text is directly relevant to them?**
+No — that's specifically what the Knowledge Library's additive ingest
+checks for. Every generated test records the retrieval context (the related
+requirements) it was actually reasoned against. If newly-added requirements
+would now show up in an *existing* test's context, that test is flagged and
+automatically regenerated the next time you generate tests — its content
+refreshes in place (same test_id, same requirement_id, no duplicate row),
+and the generation result reports it separately as `modified`, not lumped
+into `created`.
 
 ---
 

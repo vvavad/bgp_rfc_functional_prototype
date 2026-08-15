@@ -51,8 +51,14 @@ DB_PATH = KB_DIR / "knowledge.db"
 RETRIEVAL_INDEX_PATH = KB_DIR / "retrieval_index.pkl"
 ARTEFACTS_DIR = KB_DIR / "artefacts"
 UPLOADED_TESTS_DIR = KB_DIR / "uploaded_tests"
+# Committed source files a demo/operator can pick from via the knowledge-
+# library API (see ingest_rfc_incremental below) -- unlike ARTEFACTS_DIR/
+# UPLOADED_TESTS_DIR this is source-controlled content, not runtime output,
+# same category as kb/rfc4271_raw.txt.
+RFC_LIBRARY_DIR = KB_DIR / "rfc_library"
 
-for d in (KB_DIR, DOCS_DIR, PYTEST_DIR, DEDUP_DOCS_DIR, DEDUP_PYTEST_DIR, ARTEFACTS_DIR, UPLOADED_TESTS_DIR, LOGS_DIR):
+for d in (KB_DIR, DOCS_DIR, PYTEST_DIR, DEDUP_DOCS_DIR, DEDUP_PYTEST_DIR, ARTEFACTS_DIR, UPLOADED_TESTS_DIR,
+          RFC_LIBRARY_DIR, LOGS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 SUPPORTED_UPLOAD_EXTENSIONS = (".txt", ".md", ".log", ".pdf", ".py")
@@ -139,7 +145,20 @@ CREATE TABLE IF NOT EXISTS test_intents (
     protocol_reasoning TEXT DEFAULT '',
     requires_peer_emulator INTEGER DEFAULT 0,
     emulator_tool TEXT DEFAULT '',
-    needs_review INTEGER DEFAULT 0
+    needs_review INTEGER DEFAULT 0,
+    context_requirement_ids TEXT DEFAULT '[]',
+    context_stale INTEGER DEFAULT 0,
+    context_stale_reason TEXT DEFAULT '',
+    updated_at TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+    filename TEXT PRIMARY KEY,
+    rfc_number TEXT,
+    rfc_title TEXT,
+    protocol_key TEXT,
+    ingested_at TEXT,
+    requirements_added INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS ingestion_log (
@@ -207,6 +226,14 @@ def _migrate(conn):
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(test_intents)").fetchall()}
     if "ai_backend" not in cols:
         conn.execute("ALTER TABLE test_intents ADD COLUMN ai_backend TEXT DEFAULT ''")
+    if "context_requirement_ids" not in cols:
+        conn.execute("ALTER TABLE test_intents ADD COLUMN context_requirement_ids TEXT DEFAULT '[]'")
+    if "context_stale" not in cols:
+        conn.execute("ALTER TABLE test_intents ADD COLUMN context_stale INTEGER DEFAULT 0")
+    if "context_stale_reason" not in cols:
+        conn.execute("ALTER TABLE test_intents ADD COLUMN context_stale_reason TEXT DEFAULT ''")
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE test_intents ADD COLUMN updated_at TEXT DEFAULT ''")
 
     rfc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(rfc_meta)").fetchall()}
     if "protocol_key" not in rfc_cols:
@@ -548,25 +575,19 @@ def _split_into_statements(body_text):
     return statements
 
 
-def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str, protocol_override: str = ""):
-    """Full re-ingestion: parse -> extract -> persist -> rebuild retrieval index.
-    This is the ONLY function that reads raw RFC text. Everything else in this
-    module reads from the database.
-
-    protocol_override lets the caller force a specific protocol_profiles key
-    instead of auto-detecting from rfc_number/rfc_title -- for an RFC the
-    built-in table doesn't recognize (see protocol_profiles.resolve_profile).
-    An unrecognized override falls back to auto-detection rather than
-    silently no-op'ing."""
-    profile = protocol_profiles.get_profile(protocol_override) if protocol_override else None
-    if profile is None or (protocol_override and profile.key != protocol_override):
-        profile = protocol_profiles.resolve_profile(rfc_number, rfc_title)
-
+def _extract_requirements(raw_text: str, rfc_number: str, profile, counter_by_section: dict = None) -> list:
+    """Stage-A extraction only: raw text -> a list of requirement dicts, no
+    persistence. Shared by ingest_rfc (fresh full extraction, counters start
+    at 0) and ingest_rfc_incremental (counters seeded from the existing
+    per-section counts already in the DB, so requirement_id numbering keeps
+    counting up instead of restarting at 1) -- neither reimplements the
+    section/statement parsing, they only differ in what happens to the
+    result afterward (replace vs. merge)."""
+    counter_by_section = dict(counter_by_section) if counter_by_section else {}
     lines = _clean_lines(raw_text)
     sections = _split_sections(lines)
 
     requirements = []
-    counter_by_section = {}
     for sec in sections:
         if not sec["body"]:
             continue
@@ -583,6 +604,29 @@ def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str
                 "category": _classify_category(sec["title"], stmt, profile),
                 "testability": _classify_testability(stmt),
             })
+    return requirements
+
+
+def ingest_rfc(rfc_number: str, rfc_title: str, raw_text: str, source_label: str, protocol_override: str = ""):
+    """Full re-ingestion: parse -> extract -> persist -> rebuild retrieval index.
+    This is the ONLY *replace* path that reads raw RFC text -- it wipes and
+    replaces the entire knowledge base every call (requirements, statuses,
+    generated tests, rfc_meta). For adding more knowledge onto an existing
+    knowledge base without losing already-generated tests, see
+    ingest_rfc_incremental below -- a separate, additive function, not a mode
+    flag on this one, so this destructive path's behavior can't be changed
+    by accident.
+
+    protocol_override lets the caller force a specific protocol_profiles key
+    instead of auto-detecting from rfc_number/rfc_title -- for an RFC the
+    built-in table doesn't recognize (see protocol_profiles.resolve_profile).
+    An unrecognized override falls back to auto-detection rather than
+    silently no-op'ing."""
+    profile = protocol_profiles.get_profile(protocol_override) if protocol_override else None
+    if profile is None or (protocol_override and profile.key != protocol_override):
+        profile = protocol_profiles.resolve_profile(rfc_number, rfc_title)
+
+    requirements = _extract_requirements(raw_text, rfc_number, profile)
 
     conn = get_conn()
     conn.execute("DELETE FROM requirements")
@@ -625,6 +669,212 @@ def get_active_profile():
     row = conn.execute("SELECT protocol_key FROM rfc_meta WHERE id=1").fetchone()
     conn.close()
     return protocol_profiles.get_profile(row["protocol_key"] if row else "")
+
+
+# ------------------------------------------------------------------ #
+# Knowledge library -- additive ingestion from a curated folder of source
+# files (backend/kb/rfc_library/), as opposed to ingest_rfc's destructive
+# paste/upload "replace everything" path above. See design.md for the full
+# rationale; in short: this is what lets a demo ingest an RFC in stages
+# (part 1, generate, part 2, generate again) without losing part 1's tests.
+# ------------------------------------------------------------------ #
+
+_LIBRARY_HEADER_RE = re.compile(r'^([A-Z_]+):\s*(.*)$')
+
+
+def _parse_library_file(raw_text: str) -> dict:
+    """Splits a knowledge-library file into its small metadata header
+    (RFC_NUMBER / RFC_TITLE / PROTOCOL, one per line, ended by a lone '---'
+    line) and the actual RFC body text that follows -- lets a library file
+    self-describe what it is without needing a separate ingest form. Any
+    header field not present just comes back as ''; PROTOCOL is optional
+    (empty means auto-detect, same as ingest_rfc's protocol_override='')."""
+    lines = raw_text.split('\n')
+    meta = {"RFC_NUMBER": "", "RFC_TITLE": "", "PROTOCOL": ""}
+    body_start = 0
+    for i, ln in enumerate(lines):
+        if ln.strip() == "---":
+            body_start = i + 1
+            break
+        m = _LIBRARY_HEADER_RE.match(ln.strip())
+        if m and m.group(1) in meta:
+            meta[m.group(1)] = m.group(2).strip()
+    else:
+        body_start = 0  # no '---' divider found -- treat the whole file as body, no header
+    return {
+        "rfc_number": meta["RFC_NUMBER"], "rfc_title": meta["RFC_TITLE"], "protocol": meta["PROTOCOL"],
+        "body": "\n".join(lines[body_start:]),
+    }
+
+
+def _flag_context_stale_tests(new_requirement_ids: set) -> list:
+    """After new requirements are merged in, checks every existing generated
+    test to see whether its retrieval context (see _retrieval_context_for)
+    would now include one of the just-added requirements -- if so, the test
+    was generated without seeing knowledge that's now part of its local
+    context, so it's flagged context_stale for the next generation batch to
+    pick up and regenerate (see regenerate_stale_tests). This is a real
+    signal, not a guess: the TF-IDF retrieval index was already rebuilt by
+    the caller before this runs, so semantic_search here reflects the
+    enlarged corpus."""
+    if not new_requirement_ids:
+        return []
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT test_id, requirement_id FROM test_intents WHERE context_stale=0"
+    ).fetchall()
+    flagged = []
+    for row in rows:
+        req_row = conn.execute("SELECT * FROM requirements WHERE requirement_id=?", (row["requirement_id"],)).fetchone()
+        if not req_row:
+            continue
+        _related, related_ids = _retrieval_context_for(dict(req_row))
+        newly_appeared = related_ids & new_requirement_ids
+        if newly_appeared:
+            reason = f"new related requirement(s) in context: {', '.join(sorted(newly_appeared))}"
+            conn.execute(
+                "UPDATE test_intents SET context_stale=1, context_stale_reason=? WHERE test_id=?",
+                (reason, row["test_id"]),
+            )
+            flagged.append(row["test_id"])
+    conn.commit()
+    conn.close()
+    return flagged
+
+
+def ingest_rfc_incremental(filename: str, raw_text: str, source_label: str):
+    """Additive counterpart to ingest_rfc: merges new requirements from a
+    knowledge-library file INTO the current knowledge base instead of
+    replacing it -- existing requirements, generated tests, and files are
+    never deleted. Only requirement_ids not already present get inserted
+    (section-scoped IDs mean a non-overlapping section split never
+    collides); existing tests whose retrieval context now includes one of
+    the newly-added requirements are flagged context_stale for the next
+    generation batch to regenerate (see _flag_context_stale_tests,
+    regenerate_stale_tests).
+
+    Raises ValueError if a different RFC is already loaded -- merging
+    requirements from two different RFCs into one flat knowledge base isn't
+    semantically sound here; use ingest_rfc (replace) or reset first."""
+    parsed = _parse_library_file(raw_text)
+    rfc_number = parsed["rfc_number"]
+    rfc_title = parsed["rfc_title"] or f"RFC {rfc_number}"
+    if not rfc_number:
+        raise ValueError(f"{filename}: missing RFC_NUMBER header -- cannot determine requirement IDs")
+
+    conn = get_conn()
+    already_ingested = conn.execute("SELECT 1 FROM knowledge_sources WHERE filename=?", (filename,)).fetchone()
+    if already_ingested:
+        # Idempotent: re-POSTing the same filename (double-click, retry)
+        # must NOT re-extract -- the per-section requirement_id counters
+        # below are seeded from the CURRENT count in that section, so
+        # blindly re-running extraction against a file already merged in
+        # would mint a second, higher-numbered batch of "new" requirement
+        # IDs for content that's already there, silently duplicating it.
+        conn.close()
+        logger.info(f"Incremental ingest of {filename}: already ingested, no-op")
+        return {"requirement_count_added": 0, "new_requirement_ids": [], "flagged_stale_test_ids": [],
+                "already_ingested": True}
+
+    existing_meta = conn.execute("SELECT rfc_number, rfc_title, protocol_key FROM rfc_meta WHERE id=1").fetchone()
+    if existing_meta and existing_meta["rfc_number"] != rfc_number:
+        conn.close()
+        raise ValueError(
+            f"Knowledge base currently holds RFC {existing_meta['rfc_number']}; {filename} is RFC {rfc_number}. "
+            f"Use /api/ingest to replace it, or reset the knowledge base first."
+        )
+
+    if existing_meta:
+        profile = protocol_profiles.get_profile(existing_meta["protocol_key"])
+    else:
+        protocol_override = parsed["protocol"]
+        profile = protocol_profiles.get_profile(protocol_override) if protocol_override else None
+        if profile is None or (protocol_override and profile.key != protocol_override):
+            profile = protocol_profiles.resolve_profile(rfc_number, rfc_title)
+
+    counter_by_section = {r["section_id"]: r["n"] for r in
+                           conn.execute("SELECT section_id, COUNT(*) AS n FROM requirements GROUP BY section_id").fetchall()}
+    candidates = _extract_requirements(parsed["body"], rfc_number, profile, counter_by_section)
+
+    existing_ids = {r["requirement_id"] for r in conn.execute("SELECT requirement_id FROM requirements").fetchall()}
+    new_requirements = [r for r in candidates if r["requirement_id"] not in existing_ids]
+
+    for r in new_requirements:
+        conn.execute(
+            "INSERT INTO requirements VALUES (?,?,?,?,?,?,?,?)",
+            (r["requirement_id"], r["rfc"], r["section_id"], r["section_title"],
+             r["keyword"], r["statement"], r["category"], r["testability"]),
+        )
+        conn.execute("INSERT INTO requirement_status (requirement_id) VALUES (?)", (r["requirement_id"],))
+
+    if not existing_meta:
+        conn.execute(
+            "INSERT INTO rfc_meta (id, rfc_number, rfc_title, source, ingested_at, protocol_key) VALUES (1,?,?,?,?,?)",
+            (rfc_number, rfc_title, source_label, datetime.datetime.now().isoformat(timespec="seconds"), profile.key),
+        )
+
+    conn.commit()
+    conn.close()
+
+    _build_retrieval_index()
+
+    new_ids = {r["requirement_id"] for r in new_requirements}
+    flagged_stale = _flag_context_stale_tests(new_ids)
+
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO knowledge_sources (filename, rfc_number, rfc_title, protocol_key, ingested_at, "
+        "requirements_added) VALUES (?,?,?,?,?,?)",
+        (filename, rfc_number, rfc_title, profile.key,
+         datetime.datetime.now().isoformat(timespec="seconds"), len(new_requirements)),
+    )
+    _log(conn, f"RFC_INGESTED_INCREMENTAL ({filename}, {len(new_requirements)} requirement(s) added, "
+                f"{len(flagged_stale)} existing test(s) flagged context_stale)", source_label)
+    conn.commit()
+    conn.close()
+
+    logger.info(f"Incremental ingest of {filename}: {len(new_requirements)} new requirement(s), "
+                f"{len(flagged_stale)} existing test(s) flagged context_stale")
+    return {
+        "requirement_count_added": len(new_requirements),
+        "new_requirement_ids": sorted(new_ids),
+        "flagged_stale_test_ids": flagged_stale,
+    }
+
+
+def get_knowledge_library():
+    """Lists every file in kb/rfc_library/ alongside its ingested status --
+    powers GET /api/knowledge-library. Scans the folder fresh each call (it's
+    a small, source-controlled set of files) and left-joins against
+    knowledge_sources in Python rather than SQL since the file list, not the
+    DB, is the source of truth for what's selectable."""
+    conn = get_conn()
+    sources = {r["filename"]: dict(r) for r in conn.execute("SELECT * FROM knowledge_sources").fetchall()}
+    conn.close()
+    out = []
+    for path in sorted(RFC_LIBRARY_DIR.glob("*.txt")):
+        src = sources.get(path.name)
+        out.append({
+            "filename": path.name,
+            "ingested": src is not None,
+            "ingested_at": src["ingested_at"] if src else None,
+            "rfc_number": src["rfc_number"] if src else None,
+            "rfc_title": src["rfc_title"] if src else None,
+            "requirements_added": src["requirements_added"] if src else None,
+        })
+    return out
+
+
+def ingest_library_file(filename: str):
+    """Resolves `filename` safely within RFC_LIBRARY_DIR (rejects path
+    traversal / anything not actually in that folder) and ingests it via
+    ingest_rfc_incremental -- the implementation behind
+    POST /api/knowledge-library/<filename>/ingest."""
+    candidate = (RFC_LIBRARY_DIR / filename).resolve()
+    if RFC_LIBRARY_DIR.resolve() not in candidate.parents or not candidate.is_file():
+        raise ValueError(f"{filename!r} is not a file in the knowledge library")
+    raw_text = candidate.read_text(encoding="utf-8", errors="ignore")
+    return ingest_rfc_incremental(filename, raw_text, f"kb/rfc_library/{filename}")
 
 
 def _build_retrieval_index():
@@ -918,6 +1168,24 @@ def _same_section_siblings(req_dict: dict, exclude_ids: set, limit: int = 2) -> 
     return [dict(r) for r in rows]
 
 
+def _retrieval_context_for(req_dict: dict) -> tuple:
+    """The retrieval context for one requirement: semantically related
+    requirements from the SAME persisted knowledge base (hybrid retriever,
+    semantic side), plus same-section siblings via plain SQL (structural
+    side) -- gives the model the full local cluster of related MUST/SHOULD
+    clauses in that section, not just cross-similarity hits, so it has more
+    raw material to draw distinct checks from. Shared by _generate_one (what
+    the AI actually sees) and _flag_context_stale_tests (what "did this
+    test's context change" checks against) so both agree on the definition
+    of "this test's context." Returns (related_list, related_ids_set)."""
+    rid = req_dict["requirement_id"]
+    semantic_related = [r for r in semantic_search(req_dict["statement"], k=6) if r["requirement_id"] != rid][:4]
+    exclude_ids = {rid} | {r["requirement_id"] for r in semantic_related}
+    sibling_related = _same_section_siblings(req_dict, exclude_ids, limit=2)
+    related = (semantic_related + sibling_related)[:6]
+    return related, {r["requirement_id"] for r in related}
+
+
 def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived_from: str, profile) -> dict:
     """The AI-call + template-render work for a single requirement, with no
     DB writes and no file writes -- safe to run concurrently across a thread
@@ -937,16 +1205,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         category = req_dict["category"]
         keyword = req_dict["keyword"]
 
-        # Retrieval context: semantically related requirements from the SAME
-        # persisted knowledge base (hybrid retriever, semantic side), plus
-        # same-section siblings via plain SQL (structural side) -- gives the
-        # model the full local cluster of related MUST/SHOULD clauses in
-        # that section, not just cross-similarity hits, so it has more raw
-        # material to draw distinct checks from.
-        semantic_related = [r for r in semantic_search(req_dict["statement"], k=6) if r["requirement_id"] != rid][:4]
-        exclude_ids = {rid} | {r["requirement_id"] for r in semantic_related}
-        sibling_related = _same_section_siblings(req_dict, exclude_ids, limit=2)
-        related = (semantic_related + sibling_related)[:6]
+        related, related_ids = _retrieval_context_for(req_dict)
 
         ai_intent, mode = ai_generation.generate_ai_test_intent(rfc_label, req_dict, related, profile, artefact_context)
         ai_backend = ai_generation.get_active_backend_key() if ai_intent else ""
@@ -1051,6 +1310,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             "doc_content": doc_content, "pytest_content": pytest_content, "mode": mode, "ai_backend": ai_backend,
             "protocol_reasoning": protocol_reasoning, "requires_emulator": requires_emulator,
             "emulator_tool": emulator_tool, "needs_review": needs_review,
+            "context_requirement_ids": sorted(related_ids),
         }
     except Exception as e:
         logger.warning(f"_generate_one crashed unexpectedly for {rid}, falling back to a minimal stub: {e}")
@@ -1069,6 +1329,7 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
             "timers": profile.timers_for(req_dict.get("category", "general_conformance")),
             "doc_content": doc_content, "pytest_content": pytest_content, "mode": fallback_notes, "ai_backend": "",
             "protocol_reasoning": "", "requires_emulator": False, "emulator_tool": "none", "needs_review": 1,
+            "context_requirement_ids": [],
         }
 
 
@@ -1290,14 +1551,14 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
                    (test_id, requirement_id, category, test_type, risk, priority, section_id, section_title,
                     statement, keyword, topology, timers, doc_content, pytest_content, derived_from, batch_id,
                     created_at, generation_mode, ai_backend, protocol_reasoning, requires_peer_emulator,
-                    emulator_tool, needs_review)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    emulator_tool, needs_review, context_requirement_ids)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (rec["test_id"], rec["rid"], rec["category"], rec["test_type"], rec["risk"], rec["priority"],
                  rec["section_id"], rec["section_title"], rec["statement"], rec["keyword"], profile.topology_key,
                  json.dumps(rec["timers"]), rec["doc_content"], rec["pytest_content"], derived_from, batch_id,
                  datetime.datetime.now().isoformat(timespec="seconds"), rec["mode"], rec["ai_backend"],
                  rec["protocol_reasoning"], int(rec["requires_emulator"]), rec["emulator_tool"],
-                 rec["needs_review"]),
+                 rec["needs_review"], json.dumps(rec["context_requirement_ids"])),
             )
             conn.execute(
                 "UPDATE requirement_status SET has_generated_test=1, test_id=? WHERE requirement_id=?",
@@ -1419,8 +1680,9 @@ def get_matrix():
 def get_test_catalog():
     conn = get_conn()
     rows = conn.execute("SELECT test_id, requirement_id, category, test_type, risk, priority, section_id, "
-                         "section_title, statement, keyword, derived_from, batch_id, created_at, "
-                         "generation_mode, ai_backend, requires_peer_emulator, emulator_tool, needs_review "
+                         "section_title, statement, keyword, derived_from, batch_id, created_at, updated_at, "
+                         "generation_mode, ai_backend, requires_peer_emulator, emulator_tool, needs_review, "
+                         "context_stale "
                          "FROM test_intents ORDER BY created_at").fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -1451,6 +1713,89 @@ def get_rfc_meta():
     return meta
 
 
+def regenerate_stale_tests(batch_label: str = "context-refresh") -> dict:
+    """Regenerates every test flagged context_stale (see
+    _flag_context_stale_tests) through the exact same _generate_one used for
+    fresh generation -- no separate rendering logic -- overwriting the same
+    test_id's doc/pytest files and test_intents row in place (UPDATE, not a
+    new row) so the catalog doesn't grow duplicate entries for one
+    requirement. This is the "few tests modified because of new knowledge"
+    half of the incremental-ingestion story: unlike newly-created tests,
+    these keep their original test_id/requirement_id, just with content
+    regenerated against the now-larger retrieval context.
+
+    Same concurrency shape as generate_tests(): the AI-call/render step
+    (_generate_one) touches no shared state, so it runs across
+    GENERATION_CONCURRENCY threads; all DB writes and file writes happen
+    afterward, sequentially, on the single connection below. Originally this
+    ran one requirement at a time -- fine for the handful of tests a typical
+    incremental ingest flags, but a real batch (11+ stale tests found while
+    verifying the knowledge-library demo) took noticeably longer than the
+    equivalently-sized "create" pass for no good reason, since neither pass
+    is CPU-bound."""
+    conn = get_conn()
+    stale_rows = [dict(r) for r in conn.execute(
+        "SELECT test_id, requirement_id, derived_from FROM test_intents WHERE context_stale=1"
+    ).fetchall()]
+    if not stale_rows:
+        conn.close()
+        return {"modified": []}
+
+    rfc_row = conn.execute("SELECT rfc_number, rfc_title FROM rfc_meta WHERE id=1").fetchone()
+    rfc_label = f"RFC {rfc_row['rfc_number']} ({rfc_row['rfc_title']})" if rfc_row else "RFC"
+    artefact_context = get_artefact_context()
+    profile = get_active_profile()
+
+    to_process = []
+    for row in stale_rows:
+        req_row = conn.execute("SELECT * FROM requirements WHERE requirement_id=?", (row["requirement_id"],)).fetchone()
+        if not req_row:
+            continue
+        to_process.append((dict(req_row), row["derived_from"] or ""))
+
+    modified = []
+    if to_process:
+        with ThreadPoolExecutor(max_workers=min(GENERATION_CONCURRENCY, len(to_process))) as pool:
+            futures = [pool.submit(_generate_one, req_dict, rfc_label, artefact_context, derived_from, profile)
+                       for req_dict, derived_from in to_process]
+            records = {r["rid"]: r for r in (f.result() for f in as_completed(futures))}
+
+        # Write in the caller's original (stale-list) order, not completion
+        # order -- keeps the log/return list deterministic regardless of
+        # thread timing, same reasoning as generate_tests().
+        for req_dict, _derived_from in to_process:
+            rec = records.get(req_dict["requirement_id"])
+            if rec is None:
+                continue
+
+            (DOCS_DIR / f"{rec['test_id']}.md").write_text(rec["doc_content"], encoding="utf-8")
+            (PYTEST_DIR / f"test_{rec['test_id']}.py").write_text(rec["pytest_content"], encoding="utf-8")
+
+            conn.execute(
+                """UPDATE test_intents SET
+                       category=?, test_type=?, risk=?, priority=?, doc_content=?, pytest_content=?,
+                       generation_mode=?, ai_backend=?, protocol_reasoning=?, requires_peer_emulator=?,
+                       emulator_tool=?, needs_review=?, context_requirement_ids=?, context_stale=0,
+                       context_stale_reason='', updated_at=?
+                   WHERE test_id=?""",
+                (rec["category"], rec["test_type"], rec["risk"], rec["priority"], rec["doc_content"],
+                 rec["pytest_content"], rec["mode"], rec["ai_backend"], rec["protocol_reasoning"],
+                 int(rec["requires_emulator"]), rec["emulator_tool"], rec["needs_review"],
+                 json.dumps(rec["context_requirement_ids"]),
+                 datetime.datetime.now().isoformat(timespec="seconds"), rec["test_id"]),
+            )
+            modified.append(rec["test_id"])
+
+    _log(conn, f"TESTS_MODIFIED (batch label='{batch_label}', {len(modified)} existing test(s) regenerated "
+                f"due to newly ingested related knowledge)", "kb/knowledge.db ONLY -- raw RFC text not reopened")
+    conn.commit()
+    conn.close()
+    logger.info(f"regenerate_stale_tests: {len(modified)} test(s) regenerated (batch label='{batch_label}')")
+
+    refresh_deduplicated_tests()
+    return {"modified": modified}
+
+
 def generate_all_gaps(batch_label: str = "bulk-fill-all-gaps", limit: int = None):
     """Bulk-fill: generate tests for every remaining automatable gap (the
     same set the Gap Analysis tab shows), instead of the 3-per-category demo
@@ -1458,15 +1803,24 @@ def generate_all_gaps(batch_label: str = "bulk-fill-all-gaps", limit: int = None
     the out-of-the-box coverage number -- the seed package only exists so
     the dashboard isn't empty on first launch; this is the "make coverage
     real" action. `limit` caps how many gaps to fill in one call (useful to
-    avoid a single very long-running request); omit for all of them."""
+    avoid a single very long-running request); omit for all of them.
+
+    Also regenerates any test flagged context_stale by a knowledge-library
+    ingest since it was last generated (see regenerate_stale_tests) -- this
+    is the single "generate tests" action a demo re-runs after ingesting
+    more knowledge, and it reports both newly-created and modified tests."""
     cov = get_coverage()
     gap_ids = [g["requirement_id"] for g in cov["gaps_after_existing_tests"]]
     if limit is not None:
         gap_ids = gap_ids[:limit]
     if not gap_ids:
-        return {"batch_id": None, "created": [], "skipped_already_covered": [], "gap_count_before": 0}
-    result = generate_tests(gap_ids, batch_label=batch_label)
-    result["gap_count_before"] = len(gap_ids)
+        result = {"batch_id": None, "created": [], "skipped_already_covered": [], "gap_count_before": 0}
+    else:
+        result = generate_tests(gap_ids, batch_label=batch_label)
+        result["gap_count_before"] = len(gap_ids)
+
+    stale_result = regenerate_stale_tests(batch_label=batch_label)
+    result["modified"] = stale_result["modified"]
     return result
 
 

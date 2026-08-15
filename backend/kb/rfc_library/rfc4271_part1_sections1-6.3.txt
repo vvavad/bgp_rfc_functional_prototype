@@ -1,0 +1,1885 @@
+RFC_NUMBER: 4271
+RFC_TITLE: A Border Gateway Protocol 4 (BGP-4)
+PROTOCOL: bgp
+---
+
+
+
+
+
+
+Network Working Group                                    Y. Rekhter, Ed.
+Request for Comments: 4271                                    T. Li, Ed.
+Obsoletes: 1771                                            S. Hares, Ed.
+Category: Standards Track                                   January 2006
+
+
+                  A Border Gateway Protocol 4 (BGP-4)
+
+Status of This Memo
+
+   This document specifies an Internet standards track protocol for the
+   Internet community, and requests discussion and suggestions for
+   improvements.  Please refer to the current edition of the "Internet
+   Official Protocol Standards" (STD 1) for the standardization state
+   and status of this protocol.  Distribution of this memo is unlimited.
+
+Copyright Notice
+
+   Copyright (C) The Internet Society (2006).
+
+Abstract
+
+   This document discusses the Border Gateway Protocol (BGP), which is
+   an inter-Autonomous System routing protocol.
+
+   The primary function of a BGP speaking system is to exchange network
+   reachability information with other BGP systems.  This network
+   reachability information includes information on the list of
+   Autonomous Systems (ASes) that reachability information traverses.
+   This information is sufficient for constructing a graph of AS
+   connectivity for this reachability from which routing loops may be
+   pruned, and, at the AS level, some policy decisions may be enforced.
+
+   BGP-4 provides a set of mechanisms for supporting Classless Inter-
+   Domain Routing (CIDR).  These mechanisms include support for
+   advertising a set of destinations as an IP prefix, and eliminating
+   the concept of network "class" within BGP.  BGP-4 also introduces
+   mechanisms that allow aggregation of routes, including aggregation of
+   AS paths.
+
+   This document obsoletes RFC 1771.
+
+
+
+
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                     [Page 1]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+Table of Contents
+
+   1. Introduction ....................................................4
+      1.1. Definition of Commonly Used Terms ..........................4
+      1.2. Specification of Requirements ..............................6
+   2. Acknowledgements ................................................6
+   3. Summary of Operation ............................................7
+      3.1. Routes: Advertisement and Storage ..........................9
+      3.2. Routing Information Base ..................................10
+   4. Message Formats ................................................11
+      4.1. Message Header Format .....................................12
+      4.2. OPEN Message Format .......................................13
+      4.3. UPDATE Message Format .....................................14
+      4.4. KEEPALIVE Message Format ..................................21
+      4.5. NOTIFICATION Message Format ...............................21
+   5. Path Attributes ................................................23
+      5.1. Path Attribute Usage ......................................25
+           5.1.1. ORIGIN .............................................25
+           5.1.2. AS_PATH ............................................25
+           5.1.3. NEXT_HOP ...........................................26
+           5.1.4. MULTI_EXIT_DISC ....................................28
+           5.1.5. LOCAL_PREF .........................................29
+           5.1.6. ATOMIC_AGGREGATE ...................................29
+           5.1.7. AGGREGATOR .........................................30
+   6. BGP Error Handling. ............................................30
+      6.1. Message Header Error Handling .............................31
+      6.2. OPEN Message Error Handling ...............................31
+      6.3. UPDATE Message Error Handling .............................32
+      6.4. NOTIFICATION Message Error Handling .......................34
+      6.5. Hold Timer Expired Error Handling .........................34
+      6.6. Finite State Machine Error Handling .......................35
+      6.7. Cease .....................................................35
+      6.8. BGP Connection Collision Detection ........................35
+   7. BGP Version Negotiation ........................................36
+   8. BGP Finite State Machine (FSM) .................................37
+      8.1. Events for the BGP FSM ....................................38
+           8.1.1. Optional Events Linked to Optional Session
+                  Attributes .........................................38
+           8.1.2. Administrative Events ..............................42
+           8.1.3. Timer Events .......................................46
+           8.1.4. TCP Connection-Based Events ........................47
+           8.1.5. BGP Message-Based Events ...........................49
+      8.2. Description of FSM ........................................51
+           8.2.1. FSM Definition .....................................51
+                  8.2.1.1. Terms "active" and "passive" ..............52
+                  8.2.1.2. FSM and Collision Detection ...............52
+                  8.2.1.3. FSM and Optional Session Attributes .......52
+                  8.2.1.4. FSM Event Numbers .........................53
+
+
+
+Rekhter, et al.             Standards Track                     [Page 2]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+                  8.2.1.5. FSM Actions that are Implementation
+                           Dependent .................................53
+           8.2.2. Finite State Machine ...............................53
+   9. UPDATE Message Handling ........................................75
+      9.1. Decision Process ..........................................76
+           9.1.1. Phase 1: Calculation of Degree of Preference .......77
+           9.1.2. Phase 2: Route Selection ...........................77
+                  9.1.2.1. Route Resolvability Condition .............79
+                  9.1.2.2. Breaking Ties (Phase 2) ...................80
+           9.1.3. Phase 3: Route Dissemination .......................82
+           9.1.4. Overlapping Routes .................................83
+      9.2. Update-Send Process .......................................84
+           9.2.1. Controlling Routing Traffic Overhead ...............85
+                  9.2.1.1. Frequency of Route Advertisement ..........85
+                  9.2.1.2. Frequency of Route Origination ............85
+           9.2.2. Efficient Organization of Routing Information ......86
+                  9.2.2.1. Information Reduction .....................86
+                  9.2.2.2. Aggregating Routing Information ...........87
+      9.3. Route Selection Criteria ..................................89
+      9.4. Originating BGP routes ....................................89
+   10. BGP Timers ....................................................90
+   Appendix A.  Comparison with RFC 1771 .............................92
+   Appendix B.  Comparison with RFC 1267 .............................93
+   Appendix C.  Comparison with RFC 1163 .............................93
+   Appendix D.  Comparison with RFC 1105 .............................94
+   Appendix E.  TCP Options that May Be Used with BGP ................94
+   Appendix F.  Implementation Recommendations .......................95
+                Appendix F.1.  Multiple Networks Per Message .........95
+                Appendix F.2.  Reducing Route Flapping ...............96
+                Appendix F.3.  Path Attribute Ordering ...............96
+                Appendix F.4.  AS_SET Sorting ........................96
+                Appendix F.5.  Control Over Version Negotiation ......96
+                Appendix F.6.  Complex AS_PATH Aggregation ...........96
+   Security Considerations ...........................................97
+   IANA Considerations ...............................................99
+   Normative References .............................................101
+   Informative References ...........................................101
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                     [Page 3]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+1.  Introduction
+
+   The Border Gateway Protocol (BGP) is an inter-Autonomous System
+   routing protocol.
+
+   The primary function of a BGP speaking system is to exchange network
+   reachability information with other BGP systems.  This network
+   reachability information includes information on the list of
+   Autonomous Systems (ASes) that reachability information traverses.
+   This information is sufficient for constructing a graph of AS
+   connectivity for this reachability, from which routing loops may be
+   pruned and, at the AS level, some policy decisions may be enforced.
+
+   BGP-4 provides a set of mechanisms for supporting Classless Inter-
+   Domain Routing (CIDR) [RFC1518, RFC1519].  These mechanisms include
+   support for advertising a set of destinations as an IP prefix and
+   eliminating the concept of network "class" within BGP.  BGP-4 also
+   introduces mechanisms that allow aggregation of routes, including
+   aggregation of AS paths.
+
+   Routing information exchanged via BGP supports only the destination-
+   based forwarding paradigm, which assumes that a router forwards a
+   packet based solely on the destination address carried in the IP
+   header of the packet.  This, in turn, reflects the set of policy
+   decisions that can (and cannot) be enforced using BGP.  BGP can
+   support only those policies conforming to the destination-based
+   forwarding paradigm.
+
+1.1.  Definition of Commonly Used Terms
+
+   This section provides definitions for terms that have a specific
+   meaning to the BGP protocol and that are used throughout the text.
+
+   Adj-RIB-In
+      The Adj-RIBs-In contains unprocessed routing information that has
+      been advertised to the local BGP speaker by its peers.
+
+   Adj-RIB-Out
+      The Adj-RIBs-Out contains the routes for advertisement to specific
+      peers by means of the local speaker's UPDATE messages.
+
+   Autonomous System (AS)
+      The classic definition of an Autonomous System is a set of routers
+      under a single technical administration, using an interior gateway
+      protocol (IGP) and common metrics to determine how to route
+      packets within the AS, and using an inter-AS routing protocol to
+      determine how to route packets to other ASes.  Since this classic
+      definition was developed, it has become common for a single AS to
+
+
+
+Rekhter, et al.             Standards Track                     [Page 4]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+      use several IGPs and, sometimes, several sets of metrics within an
+      AS.  The use of the term Autonomous System stresses the fact that,
+      even when multiple IGPs and metrics are used, the administration
+      of an AS appears to other ASes to have a single coherent interior
+      routing plan, and presents a consistent picture of the
+      destinations that are reachable through it.
+
+   BGP Identifier
+      A 4-octet unsigned integer that indicates the BGP Identifier of
+      the sender of BGP messages.  A given BGP speaker sets the value of
+      its BGP Identifier to an IP address assigned to that BGP speaker.
+      The value of the BGP Identifier is determined upon startup and is
+      the same for every local interface and BGP peer.
+
+   BGP speaker
+      A router that implements BGP.
+
+   EBGP
+      External BGP (BGP connection between external peers).
+
+   External peer
+      Peer that is in a different Autonomous System than the local
+      system.
+
+   Feasible route
+      An advertised route that is available for use by the recipient.
+
+   IBGP
+      Internal BGP (BGP connection between internal peers).
+
+   Internal peer
+      Peer that is in the same Autonomous System as the local system.
+
+   IGP
+      Interior Gateway Protocol - a routing protocol used to exchange
+      routing information among routers within a single Autonomous
+      System.
+
+   Loc-RIB
+      The Loc-RIB contains the routes that have been selected by the
+      local BGP speaker's Decision Process.
+
+   NLRI
+      Network Layer Reachability Information.
+
+   Route
+      A unit of information that pairs a set of destinations with the
+      attributes of a path to those destinations.  The set of
+
+
+
+Rekhter, et al.             Standards Track                     [Page 5]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+      destinations are systems whose IP addresses are contained in one
+      IP address prefix carried in the Network Layer Reachability
+      Information (NLRI) field of an UPDATE message.  The path is the
+      information reported in the path attributes field of the same
+      UPDATE message.
+
+   RIB
+      Routing Information Base.
+
+   Unfeasible route
+      A previously advertised feasible route that is no longer available
+      for use.
+
+1.2.  Specification of Requirements
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this
+   document are to be interpreted as described in RFC 2119 [RFC2119].
+
+2.  Acknowledgements
+
+   This document was originally published as [RFC1267] in October 1991,
+   jointly authored by Kirk Lougheed and Yakov Rekhter.
+
+   We would like to express our thanks to Guy Almes, Len Bosack, and
+   Jeffrey C. Honig for their contributions to the earlier version
+   (BGP-1) of this document.
+
+   We would like to specially acknowledge numerous contributions by
+   Dennis Ferguson to the earlier version of this document.
+
+   We would like to explicitly thank Bob Braden for the review of the
+   earlier version (BGP-2) of this document, and for his constructive
+   and valuable comments.
+
+   We would also like to thank Bob Hinden, Director for Routing of the
+   Internet Engineering Steering Group, and the team of reviewers he
+   assembled to review the earlier version (BGP-2) of this document.
+   This team, consisting of Deborah Estrin, Milo Medin, John Moy, Radia
+   Perlman, Martha Steenstrup, Mike St. Johns, and Paul Tsuchiya, acted
+   with a strong combination of toughness, professionalism, and
+   courtesy.
+
+   Certain sections of the document borrowed heavily from IDRP
+   [IS10747], which is the OSI counterpart of BGP.  For this, credit
+   should be given to the ANSI X3S3.3 group chaired by Lyman Chapin and
+   to Charles Kunzinger, who was the IDRP editor within that group.
+
+
+
+
+Rekhter, et al.             Standards Track                     [Page 6]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   We would also like to thank Benjamin Abarbanel, Enke Chen, Edward
+   Crabbe, Mike Craren, Vincent Gillet, Eric Gray, Jeffrey Haas, Dimitry
+   Haskin, Stephen Kent, John Krawczyk, David LeRoy, Dan Massey,
+   Jonathan Natale, Dan Pei, Mathew Richardson, John Scudder, John
+   Stewart III, Dave Thaler, Paul Traina, Russ White, Curtis Villamizar,
+   and Alex Zinin for their comments.
+
+   We would like to specially acknowledge Andrew Lange for his help in
+   preparing the final version of this document.
+
+   Finally, we would like to thank all the members of the IDR Working
+   Group for their ideas and the support they have given to this
+   document.
+
+3.  Summary of Operation
+
+   The Border Gateway Protocol (BGP) is an inter-Autonomous System
+   routing protocol.  It is built on experience gained with EGP (as
+   defined in [RFC904]) and EGP usage in the NSFNET Backbone (as
+   described in [RFC1092] and [RFC1093]).  For more BGP-related
+   information, see [RFC1772], [RFC1930], [RFC1997], and [RFC2858].
+
+   The primary function of a BGP speaking system is to exchange network
+   reachability information with other BGP systems.  This network
+   reachability information includes information on the list of
+   Autonomous Systems (ASes) that reachability information traverses.
+   This information is sufficient for constructing a graph of AS
+   connectivity, from which routing loops may be pruned, and, at the AS
+   level, some policy decisions may be enforced.
+
+   In the context of this document, we assume that a BGP speaker
+   advertises to its peers only those routes that it uses itself (in
+   this context, a BGP speaker is said to "use" a BGP route if it is the
+   most preferred BGP route and is used in forwarding).  All other cases
+   are outside the scope of this document.
+
+   In the context of this document, the term "IP address" refers to an
+   IP Version 4 address [RFC791].
+
+   Routing information exchanged via BGP supports only the destination-
+   based forwarding paradigm, which assumes that a router forwards a
+   packet based solely on the destination address carried in the IP
+   header of the packet.  This, in turn, reflects the set of policy
+   decisions that can (and cannot) be enforced using BGP.  Note that
+   some policies cannot be supported by the destination-based forwarding
+   paradigm, and thus require techniques such as source routing (aka
+   explicit routing) to be enforced.  Such policies cannot be enforced
+   using BGP either.  For example, BGP does not enable one AS to send
+
+
+
+Rekhter, et al.             Standards Track                     [Page 7]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   traffic to a neighboring AS for forwarding to some destination
+   (reachable through but) beyond that neighboring AS, intending that
+   the traffic take a different route to that taken by the traffic
+   originating in the neighboring AS (for that same destination).  On
+   the other hand, BGP can support any policy conforming to the
+   destination-based forwarding paradigm.
+
+   BGP-4 provides a new set of mechanisms for supporting Classless
+   Inter-Domain Routing (CIDR) [RFC1518, RFC1519].  These mechanisms
+   include support for advertising a set of destinations as an IP prefix
+   and eliminating the concept of a network "class" within BGP.  BGP-4
+   also introduces mechanisms that allow aggregation of routes,
+   including aggregation of AS paths.
+
+   This document uses the term `Autonomous System' (AS) throughout.  The
+   classic definition of an Autonomous System is a set of routers under
+   a single technical administration, using an interior gateway protocol
+   (IGP) and common metrics to determine how to route packets within the
+   AS, and using an inter-AS routing protocol to determine how to route
+   packets to other ASes.  Since this classic definition was developed,
+   it has become common for a single AS to use several IGPs and,
+   sometimes, several sets of metrics within an AS.  The use of the term
+   Autonomous System stresses the fact that, even when multiple IGPs and
+   metrics are used, the administration of an AS appears to other ASes
+   to have a single coherent interior routing plan and presents a
+   consistent picture of the destinations that are reachable through it.
+
+   BGP uses TCP [RFC793] as its transport protocol.  This eliminates the
+   need to implement explicit update fragmentation, retransmission,
+   acknowledgement, and sequencing.  BGP listens on TCP port 179.  The
+   error notification mechanism used in BGP assumes that TCP supports a
+   "graceful" close (i.e., that all outstanding data will be delivered
+   before the connection is closed).
+
+   A TCP connection is formed between two systems.  They exchange
+   messages to open and confirm the connection parameters.
+
+   The initial data flow is the portion of the BGP routing table that is
+   allowed by the export policy, called the Adj-Ribs-Out (see 3.2).
+   Incremental updates are sent as the routing tables change.  BGP does
+   not require a periodic refresh of the routing table.  To allow local
+   policy changes to have the correct effect without resetting any BGP
+   connections, a BGP speaker SHOULD either (a) retain the current
+   version of the routes advertised to it by all of its peers for the
+   duration of the connection, or (b) make use of the Route Refresh
+   extension [RFC2918].
+
+
+
+
+
+Rekhter, et al.             Standards Track                     [Page 8]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   KEEPALIVE messages may be sent periodically to ensure that the
+   connection is live.  NOTIFICATION messages are sent in response to
+   errors or special conditions.  If a connection encounters an error
+   condition, a NOTIFICATION message is sent and the connection is
+   closed.
+
+   A peer in a different AS is referred to as an external peer, while a
+   peer in the same AS is referred to as an internal peer.  Internal BGP
+   and external BGP are commonly abbreviated as IBGP and EBGP.
+
+   If a particular AS has multiple BGP speakers and is providing transit
+   service for other ASes, then care must be taken to ensure a
+   consistent view of routing within the AS.  A consistent view of the
+   interior routes of the AS is provided by the IGP used within the AS.
+   For the purpose of this document, it is assumed that a consistent
+   view of the routes exterior to the AS is provided by having all BGP
+   speakers within the AS maintain IBGP with each other.
+
+   This document specifies the base behavior of the BGP protocol.  This
+   behavior can be, and is, modified by extension specifications.  When
+   the protocol is extended, the new behavior is fully documented in the
+   extension specifications.
+
+3.1.  Routes: Advertisement and Storage
+
+   For the purpose of this protocol, a route is defined as a unit of
+   information that pairs a set of destinations with the attributes of a
+   path to those destinations.  The set of destinations are systems
+   whose IP addresses are contained in one IP address prefix that is
+   carried in the Network Layer Reachability Information (NLRI) field of
+   an UPDATE message, and the path is the information reported in the
+   path attributes field of the same UPDATE message.
+
+   Routes are advertised between BGP speakers in UPDATE messages.
+   Multiple routes that have the same path attributes can be advertised
+   in a single UPDATE message by including multiple prefixes in the NLRI
+   field of the UPDATE message.
+
+   Routes are stored in the Routing Information Bases (RIBs): namely,
+   the Adj-RIBs-In, the Loc-RIB, and the Adj-RIBs-Out, as described in
+   Section 3.2.
+
+   If a BGP speaker chooses to advertise a previously received route, it
+   MAY add to, or modify, the path attributes of the route before
+   advertising it to a peer.
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                     [Page 9]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   BGP provides mechanisms by which a BGP speaker can inform its peers
+   that a previously advertised route is no longer available for use.
+   There are three methods by which a given BGP speaker can indicate
+   that a route has been withdrawn from service:
+
+      a) the IP prefix that expresses the destination for a previously
+         advertised route can be advertised in the WITHDRAWN ROUTES
+         field in the UPDATE message, thus marking the associated route
+         as being no longer available for use,
+
+      b) a replacement route with the same NLRI can be advertised, or
+
+      c) the BGP speaker connection can be closed, which implicitly
+         removes all routes the pair of speakers had advertised to each
+         other from service.
+
+   Changing the attribute(s) of a route is accomplished by advertising a
+   replacement route.  The replacement route carries new (changed)
+   attributes and has the same address prefix as the original route.
+
+3.2.  Routing Information Base
+
+   The Routing Information Base (RIB) within a BGP speaker consists of
+   three distinct parts:
+
+      a) Adj-RIBs-In: The Adj-RIBs-In stores routing information learned
+         from inbound UPDATE messages that were received from other BGP
+         speakers.  Their contents represent routes that are available
+         as input to the Decision Process.
+
+      b) Loc-RIB: The Loc-RIB contains the local routing information the
+         BGP speaker selected by applying its local policies to the
+         routing information contained in its Adj-RIBs-In.  These are
+         the routes that will be used by the local BGP speaker.  The
+         next hop for each of these routes MUST be resolvable via the
+         local BGP speaker's Routing Table.
+
+      c) Adj-RIBs-Out: The Adj-RIBs-Out stores information the local BGP
+         speaker selected for advertisement to its peers.  The routing
+         information stored in the Adj-RIBs-Out will be carried in the
+         local BGP speaker's UPDATE messages and advertised to its
+         peers.
+
+   In summary, the Adj-RIBs-In contains unprocessed routing information
+   that has been advertised to the local BGP speaker by its peers; the
+   Loc-RIB contains the routes that have been selected by the local BGP
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 10]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   speaker's Decision Process; and the Adj-RIBs-Out organizes the routes
+   for advertisement to specific peers (by means of the local speaker's
+   UPDATE messages).
+
+   Although the conceptual model distinguishes between Adj-RIBs-In,
+   Loc-RIB, and Adj-RIBs-Out, this neither implies nor requires that an
+   implementation must maintain three separate copies of the routing
+   information.  The choice of implementation (for example, 3 copies of
+   the information vs 1 copy with pointers) is not constrained by the
+   protocol.
+
+   Routing information that the BGP speaker uses to forward packets (or
+   to construct the forwarding table used for packet forwarding) is
+   maintained in the Routing Table.  The Routing Table accumulates
+   routes to directly connected networks, static routes, routes learned
+   from the IGP protocols, and routes learned from BGP.  Whether a
+   specific BGP route should be installed in the Routing Table, and
+   whether a BGP route should override a route to the same destination
+   installed by another source, is a local policy decision, and is not
+   specified in this document.  In addition to actual packet forwarding,
+   the Routing Table is used for resolution of the next-hop addresses
+   specified in BGP updates (see Section 5.1.3).
+
+4.  Message Formats
+
+   This section describes message formats used by BGP.
+
+   BGP messages are sent over TCP connections.  A message is processed
+   only after it is entirely received.  The maximum message size is 4096
+   octets.  All implementations are required to support this maximum
+   message size.  The smallest message that may be sent consists of a
+   BGP header without a data portion (19 octets).
+
+   All multi-octet fields are in network byte order.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 11]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+4.1.  Message Header Format
+
+   Each message has a fixed-size header.  There may or may not be a data
+   portion following the header, depending on the message type.  The
+   layout of these fields is shown below:
+
+      0                   1                   2                   3
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |                                                               |
+      +                                                               +
+      |                                                               |
+      +                                                               +
+      |                           Marker                              |
+      +                                                               +
+      |                                                               |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      |          Length               |      Type     |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+      Marker:
+
+         This 16-octet field is included for compatibility; it MUST be
+         set to all ones.
+
+      Length:
+
+         This 2-octet unsigned integer indicates the total length of the
+         message, including the header in octets.  Thus, it allows one
+         to locate the (Marker field of the) next message in the TCP
+         stream.  The value of the Length field MUST always be at least
+         19 and no greater than 4096, and MAY be further constrained,
+         depending on the message type.  "padding" of extra data after
+         the message is not allowed.  Therefore, the Length field MUST
+         have the smallest value required, given the rest of the
+         message.
+
+      Type:
+
+         This 1-octet unsigned integer indicates the type code of the
+         message.  This document defines the following type codes:
+
+                              1 - OPEN
+                              2 - UPDATE
+                              3 - NOTIFICATION
+                              4 - KEEPALIVE
+
+         [RFC2918] defines one more type code.
+
+
+
+Rekhter, et al.             Standards Track                    [Page 12]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+4.2.  OPEN Message Format
+
+   After a TCP connection is established, the first message sent by each
+   side is an OPEN message.  If the OPEN message is acceptable, a
+   KEEPALIVE message confirming the OPEN is sent back.
+
+   In addition to the fixed-size BGP header, the OPEN message contains
+   the following fields:
+
+       0                   1                   2                   3
+       0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+       +-+-+-+-+-+-+-+-+
+       |    Version    |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |     My Autonomous System      |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |           Hold Time           |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |                         BGP Identifier                        |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       | Opt Parm Len  |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+       |                                                               |
+       |             Optional Parameters (variable)                    |
+       |                                                               |
+       +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+      Version:
+
+         This 1-octet unsigned integer indicates the protocol version
+         number of the message.  The current BGP version number is 4.
+
+      My Autonomous System:
+
+         This 2-octet unsigned integer indicates the Autonomous System
+         number of the sender.
+
+      Hold Time:
+
+         This 2-octet unsigned integer indicates the number of seconds
+         the sender proposes for the value of the Hold Timer.  Upon
+         receipt of an OPEN message, a BGP speaker MUST calculate the
+         value of the Hold Timer by using the smaller of its configured
+         Hold Time and the Hold Time received in the OPEN message.  The
+         Hold Time MUST be either zero or at least three seconds.  An
+         implementation MAY reject connections on the basis of the Hold
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 13]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+         Time.  The calculated value indicates the maximum number of
+         seconds that may elapse between the receipt of successive
+         KEEPALIVE and/or UPDATE messages from the sender.
+
+      BGP Identifier:
+
+         This 4-octet unsigned integer indicates the BGP Identifier of
+         the sender.  A given BGP speaker sets the value of its BGP
+         Identifier to an IP address that is assigned to that BGP
+         speaker.  The value of the BGP Identifier is determined upon
+         startup and is the same for every local interface and BGP peer.
+
+      Optional Parameters Length:
+
+         This 1-octet unsigned integer indicates the total length of the
+         Optional Parameters field in octets.  If the value of this
+         field is zero, no Optional Parameters are present.
+
+      Optional Parameters:
+
+         This field contains a list of optional parameters, in which
+         each parameter is encoded as a <Parameter Type, Parameter
+         Length, Parameter Value> triplet.
+
+         0                   1
+         0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-...
+         |  Parm. Type   | Parm. Length  |  Parameter Value (variable)
+         +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-...
+
+         Parameter Type is a one octet field that unambiguously
+         identifies individual parameters.  Parameter Length is a one
+         octet field that contains the length of the Parameter Value
+         field in octets.  Parameter Value is a variable length field
+         that is interpreted according to the value of the Parameter
+         Type field.
+
+         [RFC3392] defines the Capabilities Optional Parameter.
+
+   The minimum length of the OPEN message is 29 octets (including the
+   message header).
+
+4.3.  UPDATE Message Format
+
+   UPDATE messages are used to transfer routing information between BGP
+   peers.  The information in the UPDATE message can be used to
+   construct a graph that describes the relationships of the various
+   Autonomous Systems.  By applying rules to be discussed, routing
+
+
+
+Rekhter, et al.             Standards Track                    [Page 14]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   information loops and some other anomalies may be detected and
+   removed from inter-AS routing.
+
+   An UPDATE message is used to advertise feasible routes that share
+   common path attributes to a peer, or to withdraw multiple unfeasible
+   routes from service (see 3.1).  An UPDATE message MAY simultaneously
+   advertise a feasible route and withdraw multiple unfeasible routes
+   from service.  The UPDATE message always includes the fixed-size BGP
+   header, and also includes the other fields, as shown below (note,
+   some of the shown fields may not be present in every UPDATE message):
+
+      +-----------------------------------------------------+
+      |   Withdrawn Routes Length (2 octets)                |
+      +-----------------------------------------------------+
+      |   Withdrawn Routes (variable)                       |
+      +-----------------------------------------------------+
+      |   Total Path Attribute Length (2 octets)            |
+      +-----------------------------------------------------+
+      |   Path Attributes (variable)                        |
+      +-----------------------------------------------------+
+      |   Network Layer Reachability Information (variable) |
+      +-----------------------------------------------------+
+
+      Withdrawn Routes Length:
+
+         This 2-octets unsigned integer indicates the total length of
+         the Withdrawn Routes field in octets.  Its value allows the
+         length of the Network Layer Reachability Information field to
+         be determined, as specified below.
+
+         A value of 0 indicates that no routes are being withdrawn from
+         service, and that the WITHDRAWN ROUTES field is not present in
+         this UPDATE message.
+
+      Withdrawn Routes:
+
+         This is a variable-length field that contains a list of IP
+         address prefixes for the routes that are being withdrawn from
+         service.  Each IP address prefix is encoded as a 2-tuple of the
+         form <length, prefix>, whose fields are described below:
+
+                  +---------------------------+
+                  |   Length (1 octet)        |
+                  +---------------------------+
+                  |   Prefix (variable)       |
+                  +---------------------------+
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 15]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+         The use and the meaning of these fields are as follows:
+
+         a) Length:
+
+            The Length field indicates the length in bits of the IP
+            address prefix.  A length of zero indicates a prefix that
+            matches all IP addresses (with prefix, itself, of zero
+            octets).
+
+         b) Prefix:
+
+            The Prefix field contains an IP address prefix, followed by
+            the minimum number of trailing bits needed to make the end
+            of the field fall on an octet boundary.  Note that the value
+            of trailing bits is irrelevant.
+
+      Total Path Attribute Length:
+
+         This 2-octet unsigned integer indicates the total length of the
+         Path Attributes field in octets.  Its value allows the length
+         of the Network Layer Reachability field to be determined as
+         specified below.
+
+         A value of 0 indicates that neither the Network Layer
+         Reachability Information field nor the Path Attribute field is
+         present in this UPDATE message.
+
+      Path Attributes:
+
+         A variable-length sequence of path attributes is present in
+         every UPDATE message, except for an UPDATE message that carries
+         only the withdrawn routes.  Each path attribute is a triple
+         <attribute type, attribute length, attribute value> of variable
+         length.
+
+         Attribute Type is a two-octet field that consists of the
+         Attribute Flags octet, followed by the Attribute Type Code
+         octet.
+
+               0                   1
+               0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
+               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+               |  Attr. Flags  |Attr. Type Code|
+               +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+         The high-order bit (bit 0) of the Attribute Flags octet is the
+         Optional bit.  It defines whether the attribute is optional (if
+         set to 1) or well-known (if set to 0).
+
+
+
+Rekhter, et al.             Standards Track                    [Page 16]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+         The second high-order bit (bit 1) of the Attribute Flags octet
+         is the Transitive bit.  It defines whether an optional
+         attribute is transitive (if set to 1) or non-transitive (if set
+         to 0).
+
+         For well-known attributes, the Transitive bit MUST be set to 1.
+         (See Section 5 for a discussion of transitive attributes.)
+
+         The third high-order bit (bit 2) of the Attribute Flags octet
+         is the Partial bit.  It defines whether the information
+         contained in the optional transitive attribute is partial (if
+         set to 1) or complete (if set to 0).  For well-known attributes
+         and for optional non-transitive attributes, the Partial bit
+         MUST be set to 0.
+
+         The fourth high-order bit (bit 3) of the Attribute Flags octet
+         is the Extended Length bit.  It defines whether the Attribute
+         Length is one octet (if set to 0) or two octets (if set to 1).
+
+         The lower-order four bits of the Attribute Flags octet are
+         unused.  They MUST be zero when sent and MUST be ignored when
+         received.
+
+         The Attribute Type Code octet contains the Attribute Type Code.
+         Currently defined Attribute Type Codes are discussed in Section
+         5.
+
+         If the Extended Length bit of the Attribute Flags octet is set
+         to 0, the third octet of the Path Attribute contains the length
+         of the attribute data in octets.
+
+         If the Extended Length bit of the Attribute Flags octet is set
+         to 1, the third and fourth octets of the path attribute contain
+         the length of the attribute data in octets.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 17]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+         The remaining octets of the Path Attribute represent the
+         attribute value and are interpreted according to the Attribute
+         Flags and the Attribute Type Code.  The supported Attribute
+         Type Codes, and their attribute values and uses are as follows:
+
+         a) ORIGIN (Type Code 1):
+
+            ORIGIN is a well-known mandatory attribute that defines the
+            origin of the path information.  The data octet can assume
+            the following values:
+
+               Value      Meaning
+
+               0         IGP - Network Layer Reachability Information
+                            is interior to the originating AS
+
+               1         EGP - Network Layer Reachability Information
+                            learned via the EGP protocol [RFC904]
+
+               2         INCOMPLETE - Network Layer Reachability
+                            Information learned by some other means
+
+            Usage of this attribute is defined in 5.1.1.
+
+         b) AS_PATH (Type Code 2):
+
+            AS_PATH is a well-known mandatory attribute that is composed
+            of a sequence of AS path segments.  Each AS path segment is
+            represented by a triple <path segment type, path segment
+            length, path segment value>.
+
+            The path segment type is a 1-octet length field with the
+            following values defined:
+
+               Value      Segment Type
+
+               1         AS_SET: unordered set of ASes a route in the
+                            UPDATE message has traversed
+
+               2         AS_SEQUENCE: ordered set of ASes a route in
+                            the UPDATE message has traversed
+
+            The path segment length is a 1-octet length field,
+            containing the number of ASes (not the number of octets) in
+            the path segment value field.
+
+            The path segment value field contains one or more AS
+            numbers, each encoded as a 2-octet length field.
+
+
+
+Rekhter, et al.             Standards Track                    [Page 18]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+            Usage of this attribute is defined in 5.1.2.
+
+         c) NEXT_HOP (Type Code 3):
+
+            This is a well-known mandatory attribute that defines the
+            (unicast) IP address of the router that SHOULD be used as
+            the next hop to the destinations listed in the Network Layer
+            Reachability Information field of the UPDATE message.
+
+            Usage of this attribute is defined in 5.1.3.
+
+         d) MULTI_EXIT_DISC (Type Code 4):
+
+            This is an optional non-transitive attribute that is a
+            four-octet unsigned integer.  The value of this attribute
+            MAY be used by a BGP speaker's Decision Process to
+            discriminate among multiple entry points to a neighboring
+            autonomous system.
+
+            Usage of this attribute is defined in 5.1.4.
+
+         e) LOCAL_PREF (Type Code 5):
+
+            LOCAL_PREF is a well-known attribute that is a four-octet
+            unsigned integer.  A BGP speaker uses it to inform its other
+            internal peers of the advertising speaker's degree of
+            preference for an advertised route.
+
+            Usage of this attribute is defined in 5.1.5.
+
+         f) ATOMIC_AGGREGATE (Type Code 6)
+
+            ATOMIC_AGGREGATE is a well-known discretionary attribute of
+            length 0.
+
+            Usage of this attribute is defined in 5.1.6.
+
+         g) AGGREGATOR (Type Code 7)
+
+            AGGREGATOR is an optional transitive attribute of length 6.
+            The attribute contains the last AS number that formed the
+            aggregate route (encoded as 2 octets), followed by the IP
+            address of the BGP speaker that formed the aggregate route
+            (encoded as 4 octets).  This SHOULD be the same address as
+            the one used for the BGP Identifier of the speaker.
+
+            Usage of this attribute is defined in 5.1.7.
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 19]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+      Network Layer Reachability Information:
+
+         This variable length field contains a list of IP address
+         prefixes.  The length, in octets, of the Network Layer
+         Reachability Information is not encoded explicitly, but can be
+         calculated as:
+
+               UPDATE message Length - 23 - Total Path Attributes Length
+               - Withdrawn Routes Length
+
+         where UPDATE message Length is the value encoded in the fixed-
+         size BGP header, Total Path Attribute Length, and Withdrawn
+         Routes Length are the values encoded in the variable part of
+         the UPDATE message, and 23 is a combined length of the fixed-
+         size BGP header, the Total Path Attribute Length field, and the
+         Withdrawn Routes Length field.
+
+         Reachability information is encoded as one or more 2-tuples of
+         the form <length, prefix>, whose fields are described below:
+
+                  +---------------------------+
+                  |   Length (1 octet)        |
+                  +---------------------------+
+                  |   Prefix (variable)       |
+                  +---------------------------+
+
+         The use and the meaning of these fields are as follows:
+
+         a) Length:
+
+            The Length field indicates the length in bits of the IP
+            address prefix.  A length of zero indicates a prefix that
+            matches all IP addresses (with prefix, itself, of zero
+            octets).
+
+         b) Prefix:
+
+            The Prefix field contains an IP address prefix, followed by
+            enough trailing bits to make the end of the field fall on an
+            octet boundary.  Note that the value of the trailing bits is
+            irrelevant.
+
+   The minimum length of the UPDATE message is 23 octets -- 19 octets
+   for the fixed header + 2 octets for the Withdrawn Routes Length + 2
+   octets for the Total Path Attribute Length (the value of Withdrawn
+   Routes Length is 0 and the value of Total Path Attribute Length is
+   0).
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 20]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   An UPDATE message can advertise, at most, one set of path attributes,
+   but multiple destinations, provided that the destinations share these
+   attributes.  All path attributes contained in a given UPDATE message
+   apply to all destinations carried in the NLRI field of the UPDATE
+   message.
+
+
+   An UPDATE message can list multiple routes that are to be withdrawn
+   from service.  Each such route is identified by its destination
+   (expressed as an IP prefix), which unambiguously identifies the route
+   in the context of the BGP speaker - BGP speaker connection to which
+   it has been previously advertised.
+
+
+   An UPDATE message might advertise only routes that are to be
+   withdrawn from service, in which case the message will not include
+   path attributes or Network Layer Reachability Information.
+   Conversely, it may advertise only a feasible route, in which case the
+   WITHDRAWN ROUTES field need not be present.
+
+   An UPDATE message SHOULD NOT include the same address prefix in the
+   WITHDRAWN ROUTES and Network Layer Reachability Information fields.
+   However, a BGP speaker MUST be able to process UPDATE messages in
+   this form.  A BGP speaker SHOULD treat an UPDATE message of this form
+   as though the WITHDRAWN ROUTES do not contain the address prefix.
+
+4.4.  KEEPALIVE Message Format
+
+   BGP does not use any TCP-based, keep-alive mechanism to determine if
+   peers are reachable.  Instead, KEEPALIVE messages are exchanged
+   between peers often enough not to cause the Hold Timer to expire.  A
+   reasonable maximum time between KEEPALIVE messages would be one third
+   of the Hold Time interval.  KEEPALIVE messages MUST NOT be sent more
+   frequently than one per second.  An implementation MAY adjust the
+   rate at which it sends KEEPALIVE messages as a function of the Hold
+   Time interval.
+
+   If the negotiated Hold Time interval is zero, then periodic KEEPALIVE
+   messages MUST NOT be sent.
+
+   A KEEPALIVE message consists of only the message header and has a
+   length of 19 octets.
+
+4.5.  NOTIFICATION Message Format
+
+   A NOTIFICATION message is sent when an error condition is detected.
+   The BGP connection is closed immediately after it is sent.
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 21]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   In addition to the fixed-size BGP header, the NOTIFICATION message
+   contains the following fields:
+
+      0                   1                   2                   3
+      0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+      | Error code    | Error subcode |   Data (variable)             |
+      +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+      Error Code:
+
+         This 1-octet unsigned integer indicates the type of
+         NOTIFICATION.  The following Error Codes have been defined:
+
+            Error Code       Symbolic Name               Reference
+
+              1         Message Header Error             Section 6.1
+
+              2         OPEN Message Error               Section 6.2
+
+              3         UPDATE Message Error             Section 6.3
+
+              4         Hold Timer Expired               Section 6.5
+
+              5         Finite State Machine Error       Section 6.6
+
+              6         Cease                            Section 6.7
+
+      Error subcode:
+
+         This 1-octet unsigned integer provides more specific
+         information about the nature of the reported error.  Each Error
+         Code may have one or more Error Subcodes associated with it.
+         If no appropriate Error Subcode is defined, then a zero
+         (Unspecific) value is used for the Error Subcode field.
+
+      Message Header Error subcodes:
+
+               1 - Connection Not Synchronized.
+               2 - Bad Message Length.
+               3 - Bad Message Type.
+
+
+
+
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 22]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+      OPEN Message Error subcodes:
+
+               1 - Unsupported Version Number.
+               2 - Bad Peer AS.
+               3 - Bad BGP Identifier.
+               4 - Unsupported Optional Parameter.
+               5 - [Deprecated - see Appendix A].
+               6 - Unacceptable Hold Time.
+
+      UPDATE Message Error subcodes:
+
+               1 - Malformed Attribute List.
+               2 - Unrecognized Well-known Attribute.
+               3 - Missing Well-known Attribute.
+               4 - Attribute Flags Error.
+               5 - Attribute Length Error.
+               6 - Invalid ORIGIN Attribute.
+               7 - [Deprecated - see Appendix A].
+               8 - Invalid NEXT_HOP Attribute.
+               9 - Optional Attribute Error.
+              10 - Invalid Network Field.
+              11 - Malformed AS_PATH.
+
+      Data:
+
+         This variable-length field is used to diagnose the reason for
+         the NOTIFICATION.  The contents of the Data field depend upon
+         the Error Code and Error Subcode.  See Section 6 for more
+         details.
+
+         Note that the length of the Data field can be determined from
+         the message Length field by the formula:
+
+                  Message Length = 21 + Data Length
+
+   The minimum length of the NOTIFICATION message is 21 octets
+   (including message header).
+
+5.  Path Attributes
+
+   This section discusses the path attributes of the UPDATE message.
+
+   Path attributes fall into four separate categories:
+
+         1. Well-known mandatory.
+         2. Well-known discretionary.
+         3. Optional transitive.
+         4. Optional non-transitive.
+
+
+
+Rekhter, et al.             Standards Track                    [Page 23]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   BGP implementations MUST recognize all well-known attributes.  Some
+   of these attributes are mandatory and MUST be included in every
+   UPDATE message that contains NLRI.  Others are discretionary and MAY
+   or MAY NOT be sent in a particular UPDATE message.
+
+   Once a BGP peer has updated any well-known attributes, it MUST pass
+   these attributes to its peers in any updates it transmits.
+
+   In addition to well-known attributes, each path MAY contain one or
+   more optional attributes.  It is not required or expected that all
+   BGP implementations support all optional attributes.  The handling of
+   an unrecognized optional attribute is determined by the setting of
+   the Transitive bit in the attribute flags octet.  Paths with
+   unrecognized transitive optional attributes SHOULD be accepted.  If a
+   path with an unrecognized transitive optional attribute is accepted
+   and passed to other BGP peers, then the unrecognized transitive
+   optional attribute of that path MUST be passed, along with the path,
+   to other BGP peers with the Partial bit in the Attribute Flags octet
+   set to 1.  If a path with a recognized, transitive optional attribute
+   is accepted and passed along to other BGP peers and the Partial bit
+   in the Attribute Flags octet is set to 1 by some previous AS, it MUST
+   NOT be set back to 0 by the current AS.  Unrecognized non-transitive
+   optional attributes MUST be quietly ignored and not passed along to
+   other BGP peers.
+
+   New, transitive optional attributes MAY be attached to the path by
+   the originator or by any other BGP speaker in the path.  If they are
+   not attached by the originator, the Partial bit in the Attribute
+   Flags octet is set to 1.  The rules for attaching new non-transitive
+   optional attributes will depend on the nature of the specific
+   attribute.  The documentation of each new non-transitive optional
+   attribute will be expected to include such rules (the description of
+   the MULTI_EXIT_DISC attribute gives an example).  All optional
+   attributes (both transitive and non-transitive), MAY be updated (if
+   appropriate) by BGP speakers in the path.
+
+   The sender of an UPDATE message SHOULD order path attributes within
+   the UPDATE message in ascending order of attribute type.  The
+   receiver of an UPDATE message MUST be prepared to handle path
+   attributes within UPDATE messages that are out of order.
+
+   The same attribute (attribute with the same type) cannot appear more
+   than once within the Path Attributes field of a particular UPDATE
+   message.
+
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 24]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   The mandatory category refers to an attribute that MUST be present in
+   both IBGP and EBGP exchanges if NLRI are contained in the UPDATE
+   message.  Attributes classified as optional for the purpose of the
+   protocol extension mechanism may be purely discretionary,
+   discretionary, required, or disallowed in certain contexts.
+
+        attribute           EBGP                    IBGP
+         ORIGIN             mandatory               mandatory
+         AS_PATH            mandatory               mandatory
+         NEXT_HOP           mandatory               mandatory
+         MULTI_EXIT_DISC    discretionary           discretionary
+         LOCAL_PREF         see Section 5.1.5       required
+         ATOMIC_AGGREGATE   see Section 5.1.6 and 9.1.4
+         AGGREGATOR         discretionary           discretionary
+
+5.1.  Path Attribute Usage
+
+   The usage of each BGP path attribute is described in the following
+   clauses.
+
+5.1.1.  ORIGIN
+
+   ORIGIN is a well-known mandatory attribute.  The ORIGIN attribute is
+   generated by the speaker that originates the associated routing
+   information.  Its value SHOULD NOT be changed by any other speaker.
+
+5.1.2.  AS_PATH
+
+   AS_PATH is a well-known mandatory attribute.  This attribute
+   identifies the autonomous systems through which routing information
+   carried in this UPDATE message has passed.  The components of this
+   list can be AS_SETs or AS_SEQUENCEs.
+
+   When a BGP speaker propagates a route it learned from another BGP
+   speaker's UPDATE message, it modifies the route's AS_PATH attribute
+   based on the location of the BGP speaker to which the route will be
+   sent:
+
+      a) When a given BGP speaker advertises the route to an internal
+         peer, the advertising speaker SHALL NOT modify the AS_PATH
+         attribute associated with the route.
+
+      b) When a given BGP speaker advertises the route to an external
+         peer, the advertising speaker updates the AS_PATH attribute as
+         follows:
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 25]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+         1) if the first path segment of the AS_PATH is of type
+            AS_SEQUENCE, the local system prepends its own AS number as
+            the last element of the sequence (put it in the leftmost
+            position with respect to the position of octets in the
+            protocol message).  If the act of prepending will cause an
+            overflow in the AS_PATH segment (i.e., more than 255 ASes),
+            it SHOULD prepend a new segment of type AS_SEQUENCE and
+            prepend its own AS number to this new segment.
+
+         2) if the first path segment of the AS_PATH is of type AS_SET,
+            the local system prepends a new path segment of type
+            AS_SEQUENCE to the AS_PATH, including its own AS number in
+            that segment.
+
+         3) if the AS_PATH is empty, the local system creates a path
+            segment of type AS_SEQUENCE, places its own AS into that
+            segment, and places that segment into the AS_PATH.
+
+   When a BGP speaker originates a route then:
+
+      a) the originating speaker includes its own AS number in a path
+         segment, of type AS_SEQUENCE, in the AS_PATH attribute of all
+         UPDATE messages sent to an external peer.  In this case, the AS
+         number of the originating speaker's autonomous system will be
+         the only entry the path segment, and this path segment will be
+         the only segment in the AS_PATH attribute.
+
+      b) the originating speaker includes an empty AS_PATH attribute in
+         all UPDATE messages sent to internal peers.  (An empty AS_PATH
+         attribute is one whose length field contains the value zero).
+
+   Whenever the modification of the AS_PATH attribute calls for
+   including or prepending the AS number of the local system, the local
+   system MAY include/prepend more than one instance of its own AS
+   number in the AS_PATH attribute.  This is controlled via local
+   configuration.
+
+5.1.3.  NEXT_HOP
+
+   The NEXT_HOP is a well-known mandatory attribute that defines the IP
+   address of the router that SHOULD be used as the next hop to the
+   destinations listed in the UPDATE message.  The NEXT_HOP attribute is
+   calculated as follows:
+
+      1) When sending a message to an internal peer, if the route is not
+         locally originated, the BGP speaker SHOULD NOT modify the
+         NEXT_HOP attribute unless it has been explicitly configured to
+         announce its own IP address as the NEXT_HOP.  When announcing a
+
+
+
+Rekhter, et al.             Standards Track                    [Page 26]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+         locally-originated route to an internal peer, the BGP speaker
+         SHOULD use the interface address of the router through which
+         the announced network is reachable for the speaker as the
+         NEXT_HOP.  If the route is directly connected to the speaker,
+         or if the interface address of the router through which the
+         announced network is reachable for the speaker is the internal
+         peer's address, then the BGP speaker SHOULD use its own IP
+         address for the NEXT_HOP attribute (the address of the
+         interface that is used to reach the peer).
+
+      2) When sending a message to an external peer, X, and the peer is
+         one IP hop away from the speaker:
+
+         - If the route being announced was learned from an internal
+           peer or is locally originated, the BGP speaker can use an
+           interface address of the internal peer router (or the
+           internal router) through which the announced network is
+           reachable for the speaker for the NEXT_HOP attribute,
+           provided that peer X shares a common subnet with this
+           address.  This is a form of "third party" NEXT_HOP attribute.
+
+         - Otherwise, if the route being announced was learned from an
+           external peer, the speaker can use an IP address of any
+           adjacent router (known from the received NEXT_HOP attribute)
+           that the speaker itself uses for local route calculation in
+           the NEXT_HOP attribute, provided that peer X shares a common
+           subnet with this address.  This is a second form of "third
+           party" NEXT_HOP attribute.
+
+         - Otherwise, if the external peer to which the route is being
+           advertised shares a common subnet with one of the interfaces
+           of the announcing BGP speaker, the speaker MAY use the IP
+           address associated with such an interface in the NEXT_HOP
+           attribute.  This is known as a "first party" NEXT_HOP
+           attribute.
+
+         - By default (if none of the above conditions apply), the BGP
+           speaker SHOULD use the IP address of the interface that the
+           speaker uses to establish the BGP connection to peer X in the
+           NEXT_HOP attribute.
+
+      3) When sending a message to an external peer X, and the peer is
+         multiple IP hops away from the speaker (aka "multihop EBGP"):
+
+         - The speaker MAY be configured to propagate the NEXT_HOP
+           attribute.  In this case, when advertising a route that the
+           speaker learned from one of its peers, the NEXT_HOP attribute
+           of the advertised route is exactly the same as the NEXT_HOP
+
+
+
+Rekhter, et al.             Standards Track                    [Page 27]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+           attribute of the learned route (the speaker does not modify
+           the NEXT_HOP attribute).
+
+         - By default, the BGP speaker SHOULD use the IP address of the
+           interface that the speaker uses in the NEXT_HOP attribute to
+           establish the BGP connection to peer X.
+
+   Normally, the NEXT_HOP attribute is chosen such that the shortest
+   available path will be taken.  A BGP speaker MUST be able to support
+   the disabling advertisement of third party NEXT_HOP attributes in
+   order to handle imperfectly bridged media.
+
+   A route originated by a BGP speaker SHALL NOT be advertised to a peer
+   using an address of that peer as NEXT_HOP.  A BGP speaker SHALL NOT
+   install a route with itself as the next hop.
+
+   The NEXT_HOP attribute is used by the BGP speaker to determine the
+   actual outbound interface and immediate next-hop address that SHOULD
+   be used to forward transit packets to the associated destinations.
+
+   The immediate next-hop address is determined by performing a
+   recursive route lookup operation for the IP address in the NEXT_HOP
+   attribute, using the contents of the Routing Table, selecting one
+   entry if multiple entries of equal cost exist.  The Routing Table
+   entry that resolves the IP address in the NEXT_HOP attribute will
+   always specify the outbound interface.  If the entry specifies an
+   attached subnet, but does not specify a next-hop address, then the
+   address in the NEXT_HOP attribute SHOULD be used as the immediate
+   next-hop address.  If the entry also specifies the next-hop address,
+   this address SHOULD be used as the immediate next-hop address for
+   packet forwarding.
+
+5.1.4.  MULTI_EXIT_DISC
+
+   The MULTI_EXIT_DISC is an optional non-transitive attribute that is
+   intended to be used on external (inter-AS) links to discriminate
+   among multiple exit or entry points to the same neighboring AS.  The
+   value of the MULTI_EXIT_DISC attribute is a four-octet unsigned
+   number, called a metric.  All other factors being equal, the exit
+   point with the lower metric SHOULD be preferred.  If received over
+   EBGP, the MULTI_EXIT_DISC attribute MAY be propagated over IBGP to
+   other BGP speakers within the same AS (see also 9.1.2.2).  The
+   MULTI_EXIT_DISC attribute received from a neighboring AS MUST NOT be
+   propagated to other neighboring ASes.
+
+   A BGP speaker MUST implement a mechanism (based on local
+   configuration) that allows the MULTI_EXIT_DISC attribute to be
+   removed from a route.  If a BGP speaker is configured to remove the
+
+
+
+Rekhter, et al.             Standards Track                    [Page 28]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   MULTI_EXIT_DISC attribute from a route, then this removal MUST be
+   done prior to determining the degree of preference of the route and
+   prior to performing route selection (Decision Process phases 1 and
+   2).
+
+   An implementation MAY also (based on local configuration) alter the
+   value of the MULTI_EXIT_DISC attribute received over EBGP.  If a BGP
+   speaker is configured to alter the value of the MULTI_EXIT_DISC
+   attribute received over EBGP, then altering the value MUST be done
+   prior to determining the degree of preference of the route and prior
+   to performing route selection (Decision Process phases 1 and 2).  See
+   Section 9.1.2.2 for necessary restrictions on this.
+
+5.1.5.  LOCAL_PREF
+
+   LOCAL_PREF is a well-known attribute that SHALL be included in all
+   UPDATE messages that a given BGP speaker sends to other internal
+   peers.  A BGP speaker SHALL calculate the degree of preference for
+   each external route based on the locally-configured policy, and
+   include the degree of preference when advertising a route to its
+   internal peers.  The higher degree of preference MUST be preferred.
+   A BGP speaker uses the degree of preference learned via LOCAL_PREF in
+   its Decision Process (see Section 9.1.1).
+
+   A BGP speaker MUST NOT include this attribute in UPDATE messages it
+   sends to external peers, except in the case of BGP Confederations
+   [RFC3065].  If it is contained in an UPDATE message that is received
+   from an external peer, then this attribute MUST be ignored by the
+   receiving speaker, except in the case of BGP Confederations
+   [RFC3065].
+
+5.1.6.  ATOMIC_AGGREGATE
+
+   ATOMIC_AGGREGATE is a well-known discretionary attribute.
+
+   When a BGP speaker aggregates several routes for the purpose of
+   advertisement to a particular peer, the AS_PATH of the aggregated
+   route normally includes an AS_SET formed from the set of ASes from
+   which the aggregate was formed.  In many cases, the network
+   administrator can determine if the aggregate can safely be advertised
+   without the AS_SET, and without forming route loops.
+
+   If an aggregate excludes at least some of the AS numbers present in
+   the AS_PATH of the routes that are aggregated as a result of dropping
+   the AS_SET, the aggregated route, when advertised to the peer, SHOULD
+   include the ATOMIC_AGGREGATE attribute.
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 29]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   A BGP speaker that receives a route with the ATOMIC_AGGREGATE
+   attribute SHOULD NOT remove the attribute when propagating the route
+   to other speakers.
+
+   A BGP speaker that receives a route with the ATOMIC_AGGREGATE
+   attribute MUST NOT make any NLRI of that route more specific (as
+   defined in 9.1.4) when advertising this route to other BGP speakers.
+
+   A BGP speaker that receives a route with the ATOMIC_AGGREGATE
+   attribute needs to be aware of the fact that the actual path to
+   destinations, as specified in the NLRI of the route, while having the
+   loop-free property, may not be the path specified in the AS_PATH
+   attribute of the route.
+
+5.1.7.  AGGREGATOR
+
+   AGGREGATOR is an optional transitive attribute, which MAY be included
+   in updates that are formed by aggregation (see Section 9.2.2.2).  A
+   BGP speaker that performs route aggregation MAY add the AGGREGATOR
+   attribute, which SHALL contain its own AS number and IP address.  The
+   IP address SHOULD be the same as the BGP Identifier of the speaker.
+
+6.  BGP Error Handling.
+
+   This section describes actions to be taken when errors are detected
+   while processing BGP messages.
+
+   When any of the conditions described here are detected, a
+   NOTIFICATION message, with the indicated Error Code, Error Subcode,
+   and Data fields, is sent, and the BGP connection is closed (unless it
+   is explicitly stated that no NOTIFICATION message is to be sent and
+   the BGP connection is not to be closed).  If no Error Subcode is
+   specified, then a zero MUST be used.
+
+   The phrase "the BGP connection is closed" means the TCP connection
+   has been closed, the associated Adj-RIB-In has been cleared, and all
+   resources for that BGP connection have been deallocated.  Entries in
+   the Loc-RIB associated with the remote peer are marked as invalid.
+   The local system recalculates its best routes for the destinations of
+   the routes marked as invalid.  Before the invalid routes are deleted
+   from the system, it advertises, to its peers, either withdraws for
+   the routes marked as invalid, or the new best routes before the
+   invalid routes are deleted from the system.
+
+   Unless specified explicitly, the Data field of the NOTIFICATION
+   message that is sent to indicate an error is empty.
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 30]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+6.1.  Message Header Error Handling
+
+   All errors detected while processing the Message Header MUST be
+   indicated by sending the NOTIFICATION message with the Error Code
+   Message Header Error.  The Error Subcode elaborates on the specific
+   nature of the error.
+
+   The expected value of the Marker field of the message header is all
+   ones.  If the Marker field of the message header is not as expected,
+   then a synchronization error has occurred and the Error Subcode MUST
+   be set to Connection Not Synchronized.
+
+   If at least one of the following is true:
+
+      - if the Length field of the message header is less than 19 or
+        greater than 4096, or
+
+      - if the Length field of an OPEN message is less than the minimum
+        length of the OPEN message, or
+
+      - if the Length field of an UPDATE message is less than the
+        minimum length of the UPDATE message, or
+
+      - if the Length field of a KEEPALIVE message is not equal to 19,
+        or
+
+      - if the Length field of a NOTIFICATION message is less than the
+        minimum length of the NOTIFICATION message,
+
+   then the Error Subcode MUST be set to Bad Message Length.  The Data
+   field MUST contain the erroneous Length field.
+
+   If the Type field of the message header is not recognized, then the
+   Error Subcode MUST be set to Bad Message Type.  The Data field MUST
+   contain the erroneous Type field.
+
+6.2.  OPEN Message Error Handling
+
+   All errors detected while processing the OPEN message MUST be
+   indicated by sending the NOTIFICATION message with the Error Code
+   OPEN Message Error.  The Error Subcode elaborates on the specific
+   nature of the error.
+
+   If the version number in the Version field of the received OPEN
+   message is not supported, then the Error Subcode MUST be set to
+   Unsupported Version Number.  The Data field is a 2-octet unsigned
+   integer, which indicates the largest, locally-supported version
+   number less than the version the remote BGP peer bid (as indicated in
+
+
+
+Rekhter, et al.             Standards Track                    [Page 31]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   the received OPEN message), or if the smallest, locally-supported
+   version number is greater than the version the remote BGP peer bid,
+   then the smallest, locally-supported version number.
+
+   If the Autonomous System field of the OPEN message is unacceptable,
+   then the Error Subcode MUST be set to Bad Peer AS.  The determination
+   of acceptable Autonomous System numbers is outside the scope of this
+   protocol.
+
+   If the Hold Time field of the OPEN message is unacceptable, then the
+   Error Subcode MUST be set to Unacceptable Hold Time.  An
+   implementation MUST reject Hold Time values of one or two seconds.
+   An implementation MAY reject any proposed Hold Time.  An
+   implementation that accepts a Hold Time MUST use the negotiated value
+   for the Hold Time.
+
+   If the BGP Identifier field of the OPEN message is syntactically
+   incorrect, then the Error Subcode MUST be set to Bad BGP Identifier.
+   Syntactic correctness means that the BGP Identifier field represents
+   a valid unicast IP host address.
+
+   If one of the Optional Parameters in the OPEN message is not
+   recognized, then the Error Subcode MUST be set to Unsupported
+   Optional Parameters.
+
+   If one of the Optional Parameters in the OPEN message is recognized,
+   but is malformed, then the Error Subcode MUST be set to 0
+   (Unspecific).
+
+6.3.  UPDATE Message Error Handling
+
+   All errors detected while processing the UPDATE message MUST be
+   indicated by sending the NOTIFICATION message with the Error Code
+   UPDATE Message Error.  The error subcode elaborates on the specific
+   nature of the error.
+
+   Error checking of an UPDATE message begins by examining the path
+   attributes.  If the Withdrawn Routes Length or Total Attribute Length
+   is too large (i.e., if Withdrawn Routes Length + Total Attribute
+   Length + 23 exceeds the message Length), then the Error Subcode MUST
+   be set to Malformed Attribute List.
+
+   If any recognized attribute has Attribute Flags that conflict with
+   the Attribute Type Code, then the Error Subcode MUST be set to
+   Attribute Flags Error.  The Data field MUST contain the erroneous
+   attribute (type, length, and value).
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 32]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   If any recognized attribute has an Attribute Length that conflicts
+   with the expected length (based on the attribute type code), then the
+   Error Subcode MUST be set to Attribute Length Error.  The Data field
+   MUST contain the erroneous attribute (type, length, and value).
+
+   If any of the well-known mandatory attributes are not present, then
+   the Error Subcode MUST be set to Missing Well-known Attribute.  The
+   Data field MUST contain the Attribute Type Code of the missing,
+   well-known attribute.
+
+   If any of the well-known mandatory attributes are not recognized,
+   then the Error Subcode MUST be set to Unrecognized Well-known
+   Attribute.  The Data field MUST contain the unrecognized attribute
+   (type, length, and value).
+
+   If the ORIGIN attribute has an undefined value, then the Error Sub-
+   code MUST be set to Invalid Origin Attribute.  The Data field MUST
+   contain the unrecognized attribute (type, length, and value).
+
+   If the NEXT_HOP attribute field is syntactically incorrect, then the
+   Error Subcode MUST be set to Invalid NEXT_HOP Attribute.  The Data
+   field MUST contain the incorrect attribute (type, length, and value).
+   Syntactic correctness means that the NEXT_HOP attribute represents a
+   valid IP host address.
+
+   The IP address in the NEXT_HOP MUST meet the following criteria to be
+   considered semantically correct:
+
+      a) It MUST NOT be the IP address of the receiving speaker.
+
+      b) In the case of an EBGP, where the sender and receiver are one
+         IP hop away from each other, either the IP address in the
+         NEXT_HOP MUST be the sender's IP address that is used to
+         establish the BGP connection, or the interface associated with
+         the NEXT_HOP IP address MUST share a common subnet with the
+         receiving BGP speaker.
+
+   If the NEXT_HOP attribute is semantically incorrect, the error SHOULD
+   be logged, and the route SHOULD be ignored.  In this case, a
+   NOTIFICATION message SHOULD NOT be sent, and the connection SHOULD
+   NOT be closed.
+
+   The AS_PATH attribute is checked for syntactic correctness.  If the
+   path is syntactically incorrect, then the Error Subcode MUST be set
+   to Malformed AS_PATH.
+
+
+
+
+
+
+Rekhter, et al.             Standards Track                    [Page 33]
+
+RFC 4271                         BGP-4                      January 2006
+
+
+   If the UPDATE message is received from an external peer, the local
+   system MAY check whether the leftmost (with respect to the position
+   of octets in the protocol message) AS in the AS_PATH attribute is
+   equal to the autonomous system number of the peer that sent the
+   message.  If the check determines this is not the case, the Error
+   Subcode MUST be set to Malformed AS_PATH.
+
+   If an optional attribute is recognized, then the value of this
+   attribute MUST be checked.  If an error is detected, the attribute
+   MUST be discarded, and the Error Subcode MUST be set to Optional
+   Attribute Error.  The Data field MUST contain the attribute (type,
+   length, and value).
+
+   If any attribute appears more than once in the UPDATE message, then
+   the Error Subcode MUST be set to Malformed Attribute List.
+
+   The NLRI field in the UPDATE message is checked for syntactic
+   validity.  If the field is syntactically incorrect, then the Error
+   Subcode MUST be set to Invalid Network Field.
+
+   If a prefix in the NLRI field is semantically incorrect (e.g., an
+   unexpected multicast IP address), an error SHOULD be logged locally,
+   and the prefix SHOULD be ignored.
+
+   An UPDATE message that contains correct path attributes, but no NLRI,
+   SHALL be treated as a valid UPDATE message.
+

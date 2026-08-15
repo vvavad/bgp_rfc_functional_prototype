@@ -38,6 +38,29 @@ First run seeds the knowledge base from the bundled `kb/rfc4271_raw.txt`
 across all requirement categories. This takes a few seconds on first launch
 only — every run after that loads instantly from `kb/knowledge.db`.
 
+A root-level `Makefile` wraps the common demo actions as `curl` calls against
+this running server — `make status`, `make library`, `make ingest
+FILE=...`, `make generate-all`, `make run-tests`, and `make demo-incremental`
+(the full "ingest half the RFC, generate, ingest the rest, generate again —
+watch new vs. modified test counts" story end to end). Run `make` with no
+target, or open the `Makefile`, for the full list.
+
+## Knowledge library — incremental ingestion
+
+Alongside the paste/upload form (below, which **replaces** the whole
+knowledge base), `backend/kb/rfc_library/` holds RFC source files kept
+separate from the app code, selectable one at a time via
+`GET /api/knowledge-library` (lists files + ingested/not-ingested status) and
+`POST /api/knowledge-library/<filename>/ingest`. Ingesting a file this way is
+**additive** — it merges new requirements into the current knowledge base
+without deleting existing requirements or already-generated tests. If newly
+ingested knowledge changes the retrieval context an existing test was
+generated against, that test is flagged and regenerated the next time you
+generate tests, so `POST /api/generate-all`'s response reports both `created`
+(new tests) and `modified` (existing tests refreshed because of new
+knowledge) — see `design.md`'s "Incremental knowledge-library ingestion"
+section for the mechanism.
+
 ## AI-powered test generation
 
 Test generation is no longer a static lookup table. Each requirement is sent,
@@ -265,12 +288,14 @@ shows every `TESTS_GENERATED` event tagged with its generation mode.
 | POST | `/api/tests/run` | actually executes `generated_tests/deduplicated/pytest` via a real `pytest` run against mocked PyEZ (`pyez/mock_device.py`) — returns pass/fail/error counts + per-test detail |
 | GET | `/api/search?q=...&k=10` | semantic search over requirements |
 | GET | `/api/ingestion-log` | knowledge base activity log |
+| GET | `/api/knowledge-library` | files in `backend/kb/rfc_library/` with ingested/not-ingested status |
+| POST | `/api/knowledge-library/<filename>/ingest` | additively ingest one library file — merges into the current knowledge base, never deletes existing requirements/tests; flags any existing test whose retrieval context now includes newly-added knowledge so the next `/api/generate-all` regenerates it |
 | GET | `/api/batches` | generation batch history |
 | GET | `/api/artefacts` | uploaded product specs / other reference artefacts |
 | GET | `/api/existing-tests` | uploaded existing tests + their AI-reviewed RFC coverage status |
 | POST | `/api/generate` | `{requirement_ids: [...], label, derived_from}` |
 | POST | `/api/generate-by-category` | `{category, count}` — generate N tests for a gap category |
-| POST | `/api/generate-all` | `{limit?}` — bulk-fill every remaining automatable gap (optionally capped) in one call, running concurrently (`AI_GENERATION_CONCURRENCY`, default 4) |
+| POST | `/api/generate-all` | `{limit?}` — bulk-fill every remaining automatable gap (optionally capped) in one call, running concurrently (`AI_GENERATION_CONCURRENCY`, default 4); response includes both `created` (new tests) and `modified` (existing tests regenerated because a knowledge-library ingest added related knowledge since they were last generated) |
 | POST | `/api/ingest` | `{rfc_number, rfc_title, raw_text, protocol?}` — replace the knowledge base with pasted text (`protocol` optionally overrides auto-detection, e.g. `bgp`/`ospf`/`generic`) |
 | POST | `/api/ingest/upload` | multipart `{rfc_number, rfc_title, rfc_file, protocol?}` (.txt/.md/.pdf) — same as above, from an uploaded file |
 | POST | `/api/artefacts/upload` | multipart `{artefact_type, file}` (.txt/.md/.pdf) — upload a product spec or other reference material |

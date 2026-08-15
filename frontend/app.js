@@ -1,5 +1,5 @@
 const API = "/api";
-let STATE = { coverage: null, matrix: null, catalog: null, ingestionLog: null, rfcMeta: null, artefacts: null, existingTests: null };
+let STATE = { coverage: null, matrix: null, catalog: null, ingestionLog: null, rfcMeta: null, artefacts: null, existingTests: null, library: null };
 let charts = {};
 
 function toast(msg, isError=false){
@@ -41,8 +41,9 @@ async function boot(){
 }
 
 async function refreshAll(){
-  const [coverage, matrix, catalog, ingestionLog, artefacts, existingTests] = await Promise.all([
-    api('/coverage'), api('/matrix'), api('/tests'), api('/ingestion-log'), api('/artefacts'), api('/existing-tests')
+  const [coverage, matrix, catalog, ingestionLog, artefacts, existingTests, library] = await Promise.all([
+    api('/coverage'), api('/matrix'), api('/tests'), api('/ingestion-log'), api('/artefacts'), api('/existing-tests'),
+    api('/knowledge-library')
   ]);
   STATE.coverage = coverage;
   STATE.matrix = matrix;
@@ -50,6 +51,7 @@ async function refreshAll(){
   STATE.ingestionLog = ingestionLog;
   STATE.artefacts = artefacts;
   STATE.existingTests = existingTests;
+  STATE.library = library;
 
   renderStats(coverage);
   renderCharts(coverage, catalog);
@@ -60,6 +62,7 @@ async function refreshAll(){
   renderTimeline(ingestionLog);
   renderArtefacts(artefacts);
   renderExistingTests(existingTests);
+  renderLibrary(library);
 }
 
 async function refreshGapsOnly(){
@@ -277,6 +280,7 @@ function genModeBadge(t){
   }
   if(t.needs_review){ parts.push(`<span class="pill negative" title="Review before trusting this assertion">review</span>`); }
   if(t.requires_peer_emulator){ parts.push(`<span class="pill policy" title="${t.emulator_tool} required">${t.emulator_tool||'emulator'}</span>`); }
+  if(t.updated_at){ parts.push(`<span class="pill boundary" title="Regenerated ${t.updated_at} — new related knowledge was ingested since this test was first created">modified</span>`); }
   return parts.join(' ');
 }
 
@@ -457,16 +461,22 @@ function paintGaps(cov, filterCat){
 document.getElementById('generateAllGapsBtn').addEventListener('click', async () => {
   const cov = STATE.coverage;
   const gapCount = (cov.gaps_after_existing_tests || cov.gaps || []).length;
-  if(gapCount === 0){ toast('No remaining gaps to fill.'); return; }
-  if(!confirm(`Generate tests for all ${gapCount} remaining gap(s)? This calls the AI backend for each one and may take a while (roughly a few seconds per test, several running concurrently).`)) return;
+  // gapCount==0 doesn't necessarily mean there's nothing to do -- a
+  // knowledge-library ingest may have flagged existing tests context_stale
+  // without opening any new automatable gap, so this still needs to run to
+  // pick up that "modified tests" pass (see pipeline.regenerate_stale_tests).
+  if(gapCount > 0 && !confirm(`Generate tests for all ${gapCount} remaining gap(s)? This calls the AI backend for each one and may take a while (roughly a few seconds per test, several running concurrently).`)) return;
   const btn = document.getElementById('generateAllGapsBtn');
   const status = document.getElementById('generateAllGapsStatus');
   btn.disabled = true; btn.textContent = 'Generating…';
-  status.textContent = `Generating ${gapCount} test(s) — this can take several minutes for a large batch…`;
+  status.textContent = gapCount > 0 ? `Generating ${gapCount} test(s) — this can take several minutes for a large batch…`
+                                     : 'Checking for tests to refresh from newly ingested knowledge…';
   try{
     const result = await api('/generate-all', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({}) });
-    status.textContent = `Done — ${result.created.length} test(s) created.`;
-    toast(`Generated ${result.created.length} test(s) across all remaining gaps.`);
+    const modifiedCount = (result.modified || []).length;
+    const modifiedNote = modifiedCount ? `, ${modifiedCount} modified` : '';
+    status.textContent = `Done — ${result.created.length} test(s) created${modifiedNote}.`;
+    toast(`Generated ${result.created.length} new test(s)${modifiedCount ? `, ${modifiedCount} modified due to newly ingested context` : ''}.`);
     await refreshAll();
   }catch(e){
     status.textContent = '';
@@ -576,6 +586,48 @@ document.getElementById('existingTestAnalyzeAllBtn').addEventListener('click', a
 });
 
 // ---------- Knowledge Base tab ----------
+
+// Knowledge library: files kept separate from the app code
+// (backend/kb/rfc_library/), ingested additively via /api/knowledge-library
+// rather than replacing the whole knowledge base like the paste/upload form
+// below does.
+function renderLibrary(files){
+  const tbody = document.querySelector('#libraryTable tbody');
+  tbody.innerHTML = files.map(f => {
+    const statusLbl = f.ingested
+      ? `<span style="color:var(--signal-green);">ingested ${f.ingested_at}</span>`
+      : `<span style="color:var(--text-faint);">not ingested</span>`;
+    const rfcLbl = f.rfc_number ? `RFC ${f.rfc_number}` : '—';
+    const addedLbl = f.requirements_added != null ? f.requirements_added : '—';
+    const action = f.ingested ? '' : `<button class="btn btn-small" data-ingest="${f.filename}">Ingest</button>`;
+    return `<tr data-filename="${f.filename}">
+      <td>${f.filename}</td>
+      <td>${rfcLbl}</td>
+      <td>${addedLbl}</td>
+      <td>${statusLbl}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" style="color:var(--text-faint);padding:16px;">No files in kb/rfc_library/.</td></tr>';
+
+  tbody.querySelectorAll('button[data-ingest]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const filename = btn.dataset.ingest;
+      btn.disabled = true; btn.textContent = 'Ingesting…';
+      try{
+        const result = await api('/knowledge-library/' + encodeURIComponent(filename) + '/ingest', { method:'POST' });
+        toast(`Ingested ${filename}: ${result.requirement_count_added} new requirement(s)`
+          + (result.flagged_stale_test_ids.length ? `, ${result.flagged_stale_test_ids.length} existing test(s) flagged for a refresh` : '') + '.');
+        const newStatus = await api('/status');
+        renderHeader(newStatus);
+        await refreshAll();
+      }catch(e){
+        toast('Ingest failed: ' + e.message, true);
+        btn.disabled = false; btn.textContent = 'Ingest';
+      }
+    });
+  });
+}
+
 function renderTimeline(log){
   document.getElementById('ingestionTimeline').innerHTML = log.map(e => `
     <div class="timeline-item">
