@@ -11,11 +11,14 @@ one-off demo script.
 """
 import os
 import re
+import sys
 import json
 import logging
 import sqlite3
 import pickle
 import datetime
+import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from string import Template
 from collections import defaultdict, Counter
@@ -1009,6 +1012,49 @@ def _generate_one(req_dict: dict, rfc_label: str, artefact_context: str, derived
         }
 
 
+# Written into generated_tests/deduplicated/pytest/conftest.py by
+# refresh_deduplicated_tests() on every refresh (that directory's *.py
+# files are cleared and rewritten each time, so this can't be a plain
+# static file living there -- it has to be re-written alongside the
+# generated tests). Shims jnpr.junos / jnpr.junos.utils.config with
+# pyez.mock_device's MockJunosDevice/MockConfig *before* pytest imports the
+# generated test files, since conftest.py is always loaded first for
+# whatever directory it lives in. PyEZ isn't a real project dependency, so
+# there's nothing genuine for this to shadow/conflict with.
+CONFTEST_CONTENT = '''"""
+Auto-written by pipeline.refresh_deduplicated_tests() on every refresh --
+do not hand-edit, it will be overwritten. Shims jnpr.junos /
+jnpr.junos.utils.config so the generated pytest stubs run against
+pyez.mock_device's MockJunosDevice/MockConfig instead of needing a real
+Junos lab.
+"""
+import sys
+import types
+from pathlib import Path
+
+_BACKEND_DIR = Path(__file__).resolve().parents[3]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+from pyez.mock_device import MockJunosDevice, MockConfig
+
+_jnpr = types.ModuleType("jnpr")
+_junos = types.ModuleType("jnpr.junos")
+_junos.Device = MockJunosDevice
+_utils = types.ModuleType("jnpr.junos.utils")
+_config = types.ModuleType("jnpr.junos.utils.config")
+_config.Config = MockConfig
+_utils.config = _config
+_junos.utils = _utils
+_jnpr.junos = _junos
+
+sys.modules["jnpr"] = _jnpr
+sys.modules["jnpr.junos"] = _junos
+sys.modules["jnpr.junos.utils"] = _utils
+sys.modules["jnpr.junos.utils.config"] = _config
+'''
+
+
 def _dedup_key(row) -> tuple:
     """Two tests count as duplicates if they'd exercise the exact same
     check the exact same way: same test_type and identical protocol
@@ -1054,9 +1100,71 @@ def refresh_deduplicated_tests() -> dict:
         kept += 1
     duplicates_ignored = len(rows) - kept
 
+    # The *.py glob above just deleted conftest.py along with everything
+    # else -- put it back so the deduplicated tests can actually be run
+    # (see run_deduplicated_tests) against the mocked PyEZ layer.
+    (DEDUP_PYTEST_DIR / "conftest.py").write_text(CONFTEST_CONTENT, encoding="utf-8")
+
     logger.info(f"Deduplication refresh: {len(rows)} total test(s), {kept} unique kept, "
                 f"{duplicates_ignored} duplicate(s) ignored")
     return {"total": len(rows), "unique": kept, "duplicates_ignored": duplicates_ignored}
+
+
+def run_deduplicated_tests(timeout_seconds: int = 300) -> dict:
+    """Actually executes every test in generated_tests/deduplicated/pytest
+    via a real `pytest` subprocess (the same interpreter/venv this Flask
+    process runs under), against the mocked PyEZ layer (pyez.mock_device) --
+    no real Junos lab required, and no protocol behavior is simulated
+    beyond plausible default field values (see mock_device's module
+    docstring for what that mock is and isn't good for). Uses pytest's
+    built-in --junitxml report (no extra plugin dependency) for a
+    structured, reliable per-test result instead of scraping stdout."""
+    test_files = list(DEDUP_PYTEST_DIR.glob("test_*.py"))
+    if not test_files:
+        return {"total": 0, "passed": 0, "failed": 0, "errored": 0, "tests": [],
+                "note": "No deduplicated tests to run yet -- generate some first."}
+
+    report_path = LOGS_DIR / "test_run_report.xml"
+    cmd = [sys.executable, "-m", "pytest", str(DEDUP_PYTEST_DIR),
+           "-q", "--tb=short", f"--junitxml={report_path}"]
+    logger.info(f"Running {len(test_files)} deduplicated test(s) against mocked PyEZ: {' '.join(cmd)}")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, cwd=str(BASE))
+    except subprocess.TimeoutExpired as e:
+        logger.warning(f"Test run timed out after {timeout_seconds}s")
+        return {"total": len(test_files), "passed": 0, "failed": 0, "errored": len(test_files), "tests": [],
+                "note": f"Test run timed out after {timeout_seconds}s", "returncode": None}
+
+    tests = []
+    passed = failed = errored = skipped = 0
+    if report_path.exists():
+        root = ET.parse(report_path).getroot()
+        for tc in root.iter("testcase"):
+            failure = tc.find("failure")
+            error = tc.find("error")
+            skip = tc.find("skipped")
+            if failure is not None:
+                outcome, message, failed = "failed", (failure.get("message") or "")[:500], failed + 1
+            elif error is not None:
+                outcome, message, errored = "error", (error.get("message") or "")[:500], errored + 1
+            elif skip is not None:
+                outcome, message, skipped = "skipped", (skip.get("message") or "")[:500], skipped + 1
+            else:
+                outcome, message, passed = "passed", "", passed + 1
+            tests.append({
+                "test_id": tc.get("classname", "") + "::" + tc.get("name", ""),
+                "outcome": outcome,
+                "duration": round(float(tc.get("time", 0) or 0), 3),
+                "message": message,
+            })
+
+    summary = {
+        "total": len(tests), "passed": passed, "failed": failed, "errored": errored, "skipped": skipped,
+        "tests": tests, "returncode": proc.returncode, "stdout_tail": proc.stdout[-3000:],
+    }
+    logger.info(f"Test run complete: {len(tests)} test(s) -- {passed} passed, {failed} failed, "
+                f"{errored} errored, {skipped} skipped")
+    return summary
 
 
 def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_from: str = ""):

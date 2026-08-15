@@ -125,6 +125,42 @@ black box. No `ANTHROPIC_API_KEY`? Same graceful fallback as generation: a
 crude keyword-overlap heuristic runs instead, always at `low` confidence so
 it's visibly a guess.
 
+## Deduplication
+
+Every generated test still lands in `generated_tests/{docs,pytest}` — the
+full, unfiltered record of everything ever generated. After every generation
+batch, `pipeline.refresh_deduplicated_tests()` also rebuilds
+`generated_tests/deduplicated/{docs,pytest}`: a curated view with duplicate
+tests collapsed to one representative each. Two tests count as duplicates
+when they share the same `test_type` *and* identical `protocol_reasoning` —
+this is exactly the real duplication pattern this catches: the heuristic-
+fallback path renders Steps/Assertion text from a fixed 5-entry lookup table
+(`STEPS_BY_TYPE`/`ASSERTION_BY_TYPE`), so any two heuristic tests of the same
+`test_type` are byte-identical apart from the requirement they trace to.
+Genuine AI reasoning is unique per test in practice, so this doesn't
+over-merge real content — verified with both real generation runs and a
+synthetic duplicate pair.
+
+## Running the tests (mocked PyEZ)
+
+The Test Catalog tab's **"Run deduplicated tests"** button (`POST
+/api/tests/run`) actually executes `generated_tests/deduplicated/pytest` via
+a real `pytest` subprocess — not a simulation. `backend/pyez/mock_device.py`
+provides `MockJunosDevice`/`MockConfig`, shimmed in for `jnpr.junos.Device`/
+`jnpr.junos.utils.config.Config` by a `conftest.py` written alongside the
+deduplicated tests on every refresh (PyEZ isn't a real project dependency, so
+there's nothing genuine for this to conflict with). The mock returns
+plausible default field values for common patterns (session
+Established/Full, a placeholder AS number, a placeholder sequence number...)
+rather than simulating real protocol behavior, so it's good for proving the
+generate → dedupe → run pipeline works end to end and for exercising simple
+state-check assertions meaningfully — but a test that needs a peer emulator
+to construct its real stimulus (`requires_peer_emulator` in the catalog) may
+pass or fail against this mock without that meaning anything about real
+conformance. Results (pass/fail/error counts, per-test outcome and failure
+message, parsed from pytest's own `--junitxml` report) show directly in the
+dashboard; the same run is recorded in `backend/logs/generation.log`.
+
 ## What's real vs. stubbed
 
 **Real, working, and live:**
@@ -140,16 +176,27 @@ it's visibly a guess.
 - Existing-test coverage review: upload a real test file, the AI maps it to
   the RFC requirements it actually verifies, and the gap list updates live
 - RFC re-ingestion: paste a different RFC's text and rebuild from scratch
+- Deduplication (`generated_tests/deduplicated/`) and actual test
+  **execution** — the deduplicated catalog runs for real via `pytest`
+  against a mocked PyEZ layer, no lab required (see "Running the tests"
+  above)
 
 **Deliberately stubbed (needs a real lab to close):**
-- Generated pytest files use real PyEZ call patterns but host/credentials
-  are placeholders — wire to your vJunos-router/vMX inventory to execute
+- Generated pytest files use real PyEZ call patterns, and now genuinely
+  *run* against the mock — but host/credentials are still placeholders for
+  a *real* lab, and `pyez/mock_device.py` would need swapping back out for
+  real PyEZ to execute against actual hardware
 - Negative/boundary/malformed-message tests need a peer emulator (ExaBGP or
-  Scapy), same as before — the AI now correctly *identifies* which tests
-  need this and names the tool, but doesn't generate the emulator scripts
-  themselves
-- Even AI-reasoned assertions are marked for review below "high" confidence —
-  treat the catalog's `review` badge as a real signal, not decoration
+  Scapy), same as before — the AI correctly *identifies* which tests need
+  this and names the tool, but doesn't generate the emulator scripts
+  themselves, and the mock can't fake that outcome either (it'll run, but a
+  pass/fail against the mock doesn't mean anything about real conformance
+  for these specifically)
+- Confidence still drives the catalog's `needs_review` badge independently
+  of whether an assertion was safe enough to promote to executable — a
+  promoted, mock-passing assertion from a low-confidence Test Intent is
+  still flagged for a human to check the reasoning behind it; treat
+  `review` as a real signal, not decoration
 
 ## Architecture
 
@@ -160,6 +207,9 @@ backend/
   protocol_profiles.py per-protocol defaults: category rules, topology, config template, PyEZ observation
   ai_generation.py     system prompts, schema validation, safety checks (backend-agnostic)
   ai_backends.py       AI backend abstraction: local Claude Code CLI, or Anthropic API key
+  pyez/
+    mock_device.py    MockJunosDevice + mocked Config -- lets generated tests actually
+                      run (see pipeline.run_deduplicated_tests) without a real Junos lab
   .env                 local environment variables (ANTHROPIC_API_KEY, AI_MODEL) — not committed
   .env.example         documented template for .env
   kb/
@@ -174,7 +224,9 @@ backend/
     deduplicated/
       docs/, pytest/  curated subset with duplicate tests collapsed to one
                       representative each (see pipeline.refresh_deduplicated_tests) --
-                      docs/pytest above are untouched, this is an additional view
+                      docs/pytest above are untouched, this is an additional view.
+                      pytest/conftest.py here shims jnpr.junos with pyez/mock_device.py
+                      so this specific folder's tests can actually be executed
   logs/
     generation.log    process log: RFC ingests, dedup results, and per-test
                       AI-backend-vs-heuristic-fallback outcome for every generated test
@@ -199,6 +251,7 @@ shows every `TESTS_GENERATED` event tagged with its generation mode.
 | GET | `/api/requirements` | all extracted requirements |
 | GET | `/api/tests` | generated test catalog (includes generation_mode, needs_review, emulator flags) |
 | GET | `/api/tests/<test_id>` | doc + pytest content for one test |
+| POST | `/api/tests/run` | actually executes `generated_tests/deduplicated/pytest` via a real `pytest` run against mocked PyEZ (`pyez/mock_device.py`) — returns pass/fail/error counts + per-test detail |
 | GET | `/api/search?q=...&k=10` | semantic search over requirements |
 | GET | `/api/ingestion-log` | knowledge base activity log |
 | GET | `/api/batches` | generation batch history |

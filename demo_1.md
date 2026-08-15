@@ -1,12 +1,13 @@
 # Demo Script — RFC Conformance Test Generation POC
 
 A walkthrough script for demoing this prototype live. Covers, in order:
-**RFC ingestion → Test Intent generation → actual pytest generation → proof
-that later runs never re-touch the raw RFC text → protocol-agnostic support
-(BGP + OSPF)**. Includes cleanup before the first run and after the demo, so
-the environment is left exactly as it was found.
+**RFC ingestion → Test Intent generation → actual pytest generation →
+running those tests for real against mocked PyEZ → proof that later runs
+never re-touch the raw RFC text → protocol-agnostic support (BGP + OSPF)**.
+Includes cleanup before the first run and after the demo, so the
+environment is left exactly as it was found.
 
-Total runtime: ~20-25 minutes at a comfortable pace.
+Total runtime: ~25-30 minutes at a comfortable pace.
 
 ---
 
@@ -20,15 +21,19 @@ mechanics and returns a structured **Test Intent** (never free-form code),
 which a deterministic template renderer compiles into two artifacts: a
 Markdown doc (the "test intent file") and a pytest/PyEZ stub (the "actual
 test"). None of this needs a provisioned `ANTHROPIC_API_KEY` — it runs
-through the local Claude Code session's own login. And the whole pipeline
-is protocol-agnostic under the hood: BGP is the flagship, but OSPF works
-today too, through the same code path.
+through the local Claude Code session's own login. Duplicate tests (mostly
+a heuristic-fallback artifact) get collapsed into a separate curated
+folder, and **that curated folder actually runs** — a real `pytest`
+execution against a mocked PyEZ layer, no lab required, proving this isn't
+just text generation. And the whole pipeline is protocol-agnostic under
+the hood: BGP is the flagship, but OSPF works today too, through the same
+code path.
 
 ---
 
 ## 1. Before you start — pre-demo cleanup
 
-The OSPF section of this demo (step 6) **replaces the knowledge base**,
+The OSPF section of this demo (step 7) **replaces the knowledge base**,
 which wipes the current BGP requirements/tests. Back everything up first so
 you can restore the real BGP demo state afterward — don't skip this.
 
@@ -69,7 +74,12 @@ print(pipeline.get_ai_status())
   ```bash
   rm -f kb/knowledge.db kb/retrieval_index.pkl
   rm -f generated_tests/docs/*.md generated_tests/pytest/*.py
+  rm -f generated_tests/deduplicated/docs/*.md generated_tests/deduplicated/pytest/*.py
   ```
+  (The deduplicated folder gets fully rebuilt — including a fresh
+  `conftest.py` for the mock — the moment step 2's bootstrap generates the
+  seed package, so this line is just for a clean look at the folder before
+  you start; it isn't load-bearing.)
 - **Option B — keep today's already-seeded state** (203 requirements, 77
   tests, 39.3% automatable coverage) and skip straight to generating *more*
   tests live in step 4. Faster, but you don't get to show the first-run
@@ -114,7 +124,10 @@ Open **http://localhost:5000**.
   and the **Generation Quality** panel — confidence distribution, so a big
   batch of tests never quietly means a big batch of *unreliable* tests.
 - **Knowledge Base tab → activity log:** exactly one `RFC_INGESTED` event.
-  Keep this tab open — you'll come back to it in step 5.
+  Keep this tab open — you'll come back to it in step 6.
+- **Test Catalog tab:** note the **"Run deduplicated tests"** button near
+  the bottom — you'll use it in step 5, once there's a generated test to
+  point it at.
 
 ---
 
@@ -146,9 +159,11 @@ Open **http://localhost:5000**.
      Point out: real PyEZ `Device`/`Config` fixtures, a real Junos config
      stanza rendered for the current protocol, the actual RPC call that
      gets executed (`rpc.get_bgp_neighbor_information()` for BGP), and the
-     AI's suggested assertion — promoted to an executable `assert` line
-     only if confidence was high and it passed a safety check, otherwise
-     left as a commented suggestion with `needs_review` set.
+     AI's suggested assertion — promoted to a real, executable `assert`
+     line whenever it passes a static safety check (every variable it
+     references is guaranteed to actually exist — no more, no less;
+     confidence no longer gates this), otherwise left as a commented
+     suggestion with `needs_review` set.
 
 **Key line to land here:** "The model never wrote this Python file. It
 returned JSON — test type, reasoning, steps, an assertion hint. This
@@ -158,7 +173,48 @@ instead of shipping something untrusted."
 
 ---
 
-## 5. Prove later runs never re-touch the RFC text (~5 min)
+## 5. Run the tests for real — mocked PyEZ (~4 min)
+
+Generating a test is only half the story. This step proves the pytest
+stubs aren't just plausible-looking text — they actually execute.
+
+1. Go to the **Test Catalog** tab and click **"Run deduplicated tests."**
+2. While it runs (a few seconds — this is a real `pytest` subprocess, not
+   a simulation), narrate: "This is running every test in the
+   deduplicated catalog against a mocked Junos device — `jnpr.junos`
+   isn't even a real dependency of this project, so `pyez/mock_device.py`
+   stands in for it. A `conftest.py`, rewritten every time the
+   deduplicated folder refreshes, swaps in `MockJunosDevice` and a mocked
+   `Config` before pytest ever imports the test files. No lab, no SSH, no
+   NETCONF connection — genuinely running the Python, not faking a
+   result."
+3. When it finishes, point out the **Total / Passed / Failed / Errored**
+   stat row and the per-test results table below it.
+4. **Say while looking at the results:** "Zero errored is the number that
+   matters most here — if the mock wiring were broken, every single test
+   would error out with an import failure. What you're seeing instead is
+   real pass/fail based on real assertions running against mock data."
+5. If anything failed, open it in the results table and read the message.
+   **Be upfront about why**, don't dodge it: the mock returns *plausible*
+   default values (session Established/Full, a placeholder AS number...)
+   for common field patterns — it does not simulate real protocol
+   behavior. A test that checks a route is genuinely *absent*, or that a
+   session was rejected because of a malformed message a peer emulator
+   would have had to construct, can fail against the mock without that
+   meaning anything about real conformance. That's exactly what
+   `requires_peer_emulator` in the catalog already flags — those are the
+   ones that need a real lab (or ExaBGP/Scapy) for a real signal, not this
+   mock.
+
+**Key line to land here:** "This closes the loop: RFC text in, a
+runnable, executing test out — and you can point at the two or three
+places in this whole pipeline where a human should still look before
+trusting a result: `needs_review`, `requires_peer_emulator`, and now,
+whether a test passed against the mock for the right reason."
+
+---
+
+## 6. Prove later runs never re-touch the RFC text (~5 min)
 
 1. Go back to the **Knowledge Base tab → activity log**. Scroll through it:
    still exactly **one** `RFC_INGESTED` event, no matter how many
@@ -189,7 +245,7 @@ instead of shipping something untrusted."
 
 ---
 
-## 6. Protocol-agnostic support — ingest OSPF instead of BGP (~5 min)
+## 7. Protocol-agnostic support — ingest OSPF instead of BGP (~5 min)
 
 Everything so far — category classification, the Junos config template,
 the PyEZ observation point, even the AI's system prompt — has been
@@ -279,7 +335,7 @@ back to a generic profile instead of silently assuming BGP."
 
 ---
 
-## 7. After the demo — cleanup
+## 8. After the demo — cleanup
 
 Restore the real BGP state you backed up in step 1, so the environment is
 ready for next time.
@@ -291,18 +347,21 @@ Ctrl+C
 cd backend
 
 # Restore the pre-demo knowledge base and generated tests, overwriting the
-# OSPF state from step 6.
+# OSPF state from step 7.
 cp /tmp/poc_demo_backup/knowledge.db kb/knowledge.db
 cp /tmp/poc_demo_backup/retrieval_index.pkl kb/retrieval_index.pkl
 rm -rf generated_tests/docs generated_tests/pytest
 cp -r /tmp/poc_demo_backup/generated_tests/docs generated_tests/docs
 cp -r /tmp/poc_demo_backup/generated_tests/pytest generated_tests/pytest
 
-# Confirm the restore worked before tearing down the backup.
+# Confirm the restore worked, then rebuild the deduplicated view (and its
+# conftest.py) from the restored DB -- don't try to cp -r it back from the
+# backup, the DB is the source of truth and this regenerates it correctly.
 python3 -c "
 import pipeline
 print(pipeline.get_rfc_meta())
 print(pipeline.get_coverage()['tests_generated'], 'tests restored')
+print(pipeline.refresh_deduplicated_tests())
 "
 ```
 
@@ -313,7 +372,7 @@ scratch files:
 
 ```bash
 rm -rf /tmp/poc_demo_backup
-rm -f /tmp/rfc4271_raw.txt.bak   # only if step 5's optional bonus left it behind
+rm -f /tmp/rfc4271_raw.txt.bak   # only if step 6's optional bonus left it behind
 ```
 
 If you uploaded any sample files during an optional Gap Analysis / existing-
@@ -337,8 +396,8 @@ it did before the demo started.
 
 ## Optional extensions (if time allows)
 
-Not core to the four things this script proves, but available if the
-audience wants more:
+Not core to the things this script proves in steps 2-7, but available if
+the audience wants more:
 
 - **Gap Analysis → upload an existing test.** Upload a sample pytest file,
   click Analyze, and show the AI deciding whether it *actually* verifies
@@ -352,3 +411,13 @@ audience wants more:
   gaps" — mention this is the on-demand action used to raise coverage
   before a demo, run concurrently across several requirements at once
   rather than one at a time.
+- **Run the OSPF tests too, right after step 7.** Click "Run deduplicated
+  tests" again while OSPF is loaded — same mock, same button, same
+  mechanism, and it'll pick OSPF-flavored default values for the mocked
+  fields (`neighbor-state` → `"Full"`, etc.) with zero protocol-specific
+  code in the runner itself. Good proof that the "run" feature is exactly
+  as protocol-agnostic as generation is.
+- **Peek at `backend/logs/generation.log`.** A real file on disk with
+  every RFC ingest, every generated test's AI-backend-vs-heuristic-fallback
+  outcome, and every test-run summary — useful if someone asks "how would
+  I audit this after the fact, not just watch the dashboard live."

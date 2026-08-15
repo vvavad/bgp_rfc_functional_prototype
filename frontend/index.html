@@ -104,6 +104,20 @@
         <tbody></tbody>
       </table>
     </div>
+
+    <div class="panel section-gap">
+      <h2>Run tests (mocked PyEZ)</h2>
+      <div class="desc">Actually executes the deduplicated test catalog (<code>generated_tests/deduplicated/pytest</code>) via a real <code>pytest</code> run — no lab required. <code>jnpr.junos.Device</code>/<code>Config</code> are shimmed with <code>pyez/mock_device.py</code>'s mocks, which return plausible default field values (session Established/Full, a placeholder AS number, etc.) rather than simulating real protocol behavior. Tests that need a peer emulator to construct their real stimulus may pass or fail against this mock without that meaning anything about real conformance — point those at a real lab for a real signal; this proves the generate → dedupe → run pipeline works end to end.</div>
+      <div class="filter-row">
+        <button class="btn btn-warn" id="runTestsBtn">Run deduplicated tests</button>
+        <span id="runTestsStatus" class="muted-note"></span>
+      </div>
+      <div id="runTestsSummary" class="stat-row"></div>
+      <table class="data" id="runTestsTable" style="display:none;">
+        <thead><tr><th>Test</th><th>Outcome</th><th>Duration (s)</th><th>Message</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
   </div>
 
   <!-- GAPS -->

@@ -320,6 +320,54 @@ function applyCatalogFilters(){
   document.getElementById(id).addEventListener('change', applyCatalogFilters);
 });
 
+// ---------- Run tests (mocked PyEZ) ----------
+document.getElementById('runTestsBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('runTestsBtn');
+  const status = document.getElementById('runTestsStatus');
+  btn.disabled = true; btn.textContent = 'Running…';
+  status.textContent = 'Executing the deduplicated test catalog against mocked PyEZ…';
+  try{
+    const result = await api('/tests/run', { method: 'POST' });
+    renderRunTestsResult(result);
+    status.textContent = result.note || `Done — ${result.total} test(s) run.`;
+    toast(result.total ? `${result.passed}/${result.total} test(s) passed.` : 'No deduplicated tests to run yet.');
+  }catch(e){
+    status.textContent = '';
+    toast('Test run failed: ' + e.message, true);
+  }finally{
+    btn.disabled = false; btn.textContent = 'Run deduplicated tests';
+  }
+});
+
+function renderRunTestsResult(result){
+  const summaryEl = document.getElementById('runTestsSummary');
+  const stats = [
+    {num: result.total, lbl: 'Total', cls: ''},
+    {num: result.passed, lbl: 'Passed', cls: 'accent-green'},
+    {num: result.failed, lbl: 'Failed', cls: 'accent-amber'},
+    {num: result.errored, lbl: 'Errored', cls: 'accent-amber'},
+  ];
+  summaryEl.innerHTML = stats.map(s => `<div class="stat ${s.cls}"><div class="num">${s.num}</div><div class="lbl">${s.lbl}</div></div>`).join('');
+
+  const table = document.getElementById('runTestsTable');
+  const tbody = table.querySelector('tbody');
+  if(!result.tests || !result.tests.length){
+    table.style.display = 'none';
+    return;
+  }
+  table.style.display = '';
+  const escapeHtml = s => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  tbody.innerHTML = result.tests.map(t => {
+    const color = t.outcome === 'passed' ? 'positive' : (t.outcome === 'skipped' ? 'boundary' : 'negative');
+    return `<tr>
+      <td class="reqid">${escapeHtml(t.test_id.split('::').pop())}</td>
+      <td><span class="pill ${color}">${t.outcome}</span></td>
+      <td>${t.duration}</td>
+      <td style="white-space:pre-wrap;font-family:monospace;font-size:11px;">${escapeHtml(t.message)}</td>
+    </tr>`;
+  }).join('');
+}
+
 async function openModal(testId){
   try{
     const t = await api('/tests/' + encodeURIComponent(testId));

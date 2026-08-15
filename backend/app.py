@@ -87,6 +87,16 @@ def api_test_detail(test_id):
     return jsonify(detail)
 
 
+@app.post("/api/tests/run")
+def api_run_tests():
+    """Actually executes the deduplicated test catalog (generated_tests/
+    deduplicated/pytest) via a real pytest subprocess against the mocked
+    PyEZ layer (pyez.mock_device) -- no real Junos lab required. This is
+    the 'prove these tests actually run' action, distinct from generation."""
+    result = pipeline.run_deduplicated_tests()
+    return jsonify(result)
+
+
 @app.get("/api/batches")
 def api_batches():
     return jsonify(pipeline.get_batches())

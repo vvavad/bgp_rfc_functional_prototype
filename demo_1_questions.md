@@ -116,12 +116,34 @@ edge cases.
 
 ## Test execution & lab readiness
 
-**Q: Can these generated tests actually run against a real router right
-now?**
-Not out of the box — the pytest stubs use real PyEZ call patterns, but the
-device host/credentials are placeholders you wire to your own
-vJunos-router/vMX lab inventory. The protocol reasoning and structure are
-real; the last-mile lab connection is deliberately left as a stub.
+**Q: Can these generated tests actually run right now?**
+Yes, against a mock — click "Run deduplicated tests" and it executes the
+deduplicated catalog via a real `pytest` subprocess against
+`pyez/mock_device.py`'s `MockJunosDevice`/`MockConfig`, no lab required.
+Against a *real* vJunos-router/vMX, not yet: the device host/credentials
+in the pytest fixtures are still placeholders, and the mock would need
+swapping back out for real PyEZ. The protocol reasoning and test structure
+are real either way; the last-mile real-lab connection is what's stubbed.
+
+**Q: If it's just a mock, how do I know the test run result means
+anything?**
+For simple state checks, it's a genuine signal — the mock returns
+plausible default values (session Established/Full, etc.) and the
+assertion logic actually executes and actually evaluates them. What it
+can't do is fabricate a real negative-path outcome: a test that needs a
+peer emulator to construct a malformed stimulus (flagged
+`requires_peer_emulator` in the catalog) may pass or fail against the mock
+without that meaning anything about real conformance. Treat a mock run as
+proof the harness works end to end, not as a substitute for the lab on
+those specific tests.
+
+**Q: What happens if the mock wiring itself is broken — would I even
+notice?**
+Yes — that shows up as every single test *erroring* (an import failure),
+not a mix of pass/fail. The distinction matters: 0 errored with some
+genuine failures (like a route that's expected to be absent but the mock
+always returns a placeholder) is a working harness; N errored out of N is
+a broken one. Verified this distinction directly during development.
 
 **Q: How do negative/malformed-message tests actually get executed, since
 Junos won't send bad packets itself?**
@@ -137,6 +159,55 @@ That's exactly what the Overview tab's Generation Quality panel shows —
 total tests, high-confidence count, needs-review count, and how many
 require a peer emulator — so bulk-generating more tests doesn't quietly
 mean generating less trustworthy ones.
+
+**Q: Why does a low-confidence test still have an executable assertion
+instead of a commented-out suggestion?**
+Promotion to executable now depends only on a safety check — no imports,
+no dangerous calls, and every variable it references is guaranteed to
+actually exist in the rendered test — not on the model's self-reported
+confidence. A real, runnable check beats none. Confidence still
+independently sets the `needs_review` flag, so a low-confidence assertion
+still gets flagged for a human to double-check the reasoning behind it,
+even though it's guaranteed not to crash.
+
+---
+
+## Deduplication
+
+**Q: Why were there so many near-identical generated tests?**
+About a third of an early batch were generated before any AI backend
+existed on this machine — the fallback path renders Steps/Assertion text
+from a fixed 5-entry lookup table keyed only by test type, not
+per-requirement reasoning, so any two fallback tests of the same type were
+byte-identical apart from the requirement they trace to. Genuine
+AI-reasoned tests don't have this problem — verified across every real
+generation run.
+
+**Q: Are duplicate tests deleted?**
+No — `generated_tests/docs`/`pytest` stay the complete, unfiltered record
+of everything ever generated, for traceability. A separate
+`generated_tests/deduplicated/` folder holds the curated view with
+duplicates collapsed to one representative each, rebuilt automatically
+after every generation batch. That deduplicated folder is also what "Run
+deduplicated tests" executes.
+
+**Q: How does it decide two tests are duplicates?**
+Same test type and identical protocol-reasoning text. That's deliberately
+narrow — it's exactly the real duplication pattern (see above), and
+genuine AI reasoning is unique per test in practice, so this doesn't
+accidentally merge two tests that happen to share a test type but actually
+check different things.
+
+---
+
+## Process log
+
+**Q: Is there an audit trail beyond what the dashboard shows live?**
+Yes — `backend/logs/generation.log`, a real file on disk (not just the
+in-database activity log the Knowledge Base tab reads). It records every
+RFC ingest, every generated test's outcome — explicitly whether the AI
+backend answered or it fell back to heuristic, and which backend — batch
+summaries, deduplication results, and test-run summaries.
 
 ---
 

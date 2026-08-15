@@ -116,10 +116,34 @@ a team's real test isn't double-counted.
   expression). `pipeline.py`'s string templates are the only thing that
   produce doc/pytest text — this keeps "AI reasoning" and "executed code"
   separated by a validated boundary.
-- `_safe_assertion_expr` is a narrow AST allowlist (no imports, no calls
-  beyond a handful of safe attribute methods) that decides whether a
+- `_safe_assertion_expr(code, known_names)` is a narrow AST allowlist (no
+  imports, no calls beyond a handful of safe attribute methods, **and every
+  `ast.Name` reference must be in `known_names`**) that decides whether a
   suggested assertion gets promoted to an executable `assert` line or stays a
-  commented TODO. Promotion also requires `confidence == "high"`.
+  commented TODO. `known_names` is `{profile.result_var}` plus any variable
+  the model declared via the `observations` schema field (see below) —
+  promotion is gated on safety only, **not confidence**; a safe assertion
+  from a low-confidence Test Intent still gets promoted, it just also keeps
+  `needs_review=1` so a human double-checks the reasoning behind it
+  independently of whether it's guaranteed to run without crashing.
+- **`observations` schema field (Test Intent):** the model can declare up to
+  3 named data fetches — `{var_name, source, xpath}` — instead of only ever
+  getting the one value auto-fetched via the profile's `observation_call`/
+  `observation_field` (`profile.result_var`). `source` is either `"primary"`
+  (a different XPath into the same already-fetched response) or a key from
+  `profile.secondary_observations` (a small trusted per-protocol menu of
+  *additional* RPC calls, e.g. BGP's `route_table` →
+  `get_route_information(table='inet.0')`, OSPF's `lsdb` →
+  `get_ospf_database_information()`). The model only ever picks a menu key
+  and supplies data (a variable name, an XPath string) — `pipeline.py`
+  renders the actual fetch code from the trusted profile, never from AI
+  text. This exists because the single generic `result_var` is usually too
+  shallow to test a specific requirement (e.g. AS_PATH content, an LSA
+  field) — before this, the model would invent a plausible-sounding
+  variable name for data it had no real way to fetch, and that assertion,
+  if promoted, raised `NameError` the moment anyone ran it. Verified fix by
+  regenerating all 33 then-existing tests: 36 real `assert` statements
+  across 33 files, zero referencing an undefined name.
 - Same pattern reused for existing-test coverage review
   (`analyze_existing_test_coverage`): candidates come from the TF-IDF index,
   the model can only tag requirement IDs it was actually offered, response is
@@ -136,7 +160,12 @@ listed in `README.md`. `boot()` loads `/api/status` then `refreshAll()` pulls
 coverage/matrix/catalog/ingestion-log/artefacts/existing-tests in parallel and
 re-renders every panel. Chart.js for the two Overview charts (category
 stacked bar, test-type donut), `marked` + `DOMPurify` to render a generated
-test's Markdown doc in the detail modal.
+test's Markdown doc in the detail modal. Overview tab also has the
+Generation Quality panel (confidence/needs-review/emulator-required
+distribution, computed client-side from the already-loaded catalog); Test
+Catalog tab has the "Run deduplicated tests" button + results table
+(`renderRunTestsResult`) that triggers `POST /api/tests/run` and shows
+pass/fail/error counts and per-test outcome/message.
 
 ## Protocol-agnostic architecture (`protocol_profiles.py`)
 
@@ -263,6 +292,97 @@ that `generate_tests`'s per-requirement loop was fully sequential, making a
   the rest is a deliberate on-demand action before a demo, not part of
   every fresh install's bootstrap (kept the existing fast-startup seed).
 
+## Deduplication (`pipeline.refresh_deduplicated_tests`)
+
+Real duplicates were found in the catalog: 29 of the first 77 generated
+tests were `heuristic-fallback` (generated before any AI backend existed —
+timestamped at the very first bootstrap), and the heuristic path renders
+Steps/Assertion text from a fixed 5-entry lookup table
+(`STEPS_BY_TYPE`/`ASSERTION_BY_TYPE`, keyed only by `test_type`) rather than
+per-requirement reasoning — so any two heuristic tests of the same
+`test_type` are byte-identical apart from the requirement ID/statement.
+
+- **`generated_tests/docs` and `generated_tests/pytest` are untouched** —
+  they stay the complete, unfiltered record of everything ever generated.
+- **`generated_tests/deduplicated/{docs,pytest}`** is a new, additional
+  view: `refresh_deduplicated_tests()` (called automatically at the end of
+  every `generate_tests()` batch) recomputes it from the *entire* current
+  `test_intents` table — not just the latest batch, since a new test can
+  duplicate one from an older batch — clears and rewrites both directories
+  from scratch each time.
+- **`_dedup_key(row) = (test_type, protocol_reasoning.strip())`.** Two tests
+  are duplicates if both match. For heuristic tests, `protocol_reasoning`
+  is the same fixed string for every heuristic test regardless of
+  `test_type`, so `test_type` is what actually separates the 5 real
+  duplicate groups; for genuine AI reasoning, `protocol_reasoning` is
+  unique per test in practice (verified across every real generation run
+  this session), so this key doesn't over-merge real content. Within a
+  duplicate group, the earliest-created test is kept as the
+  representative.
+- Verified with a synthetic duplicate pair injected directly into
+  `test_intents` (same `test_type`/`protocol_reasoning`, different
+  `requirement_id`): correctly collapsed to 1, `duplicates_ignored: 1`;
+  cleaned up after. Real generation runs since then have shown 0 false
+  merges among genuine AI content.
+
+## Process log (`backend/logs/generation.log`)
+
+A real file on disk, separate from the in-DB `ingestion_log` table the
+dashboard reads. `pipeline._setup_process_log_file()` attaches a
+`FileHandler` to the `pipeline` and `ai_generation` loggers **by name**
+(not the root logger), so Flask/werkzeug's own request logging isn't
+pulled in. Records, at INFO level: every RFC ingest, every generated
+test's outcome — explicitly **which backend answered or that it fell back
+to heuristic** (`"{rid}: generated via AI backend '{backend}' (mode=...)"`
+vs. `"{rid}: AI unavailable/failed ({mode}) -- used heuristic fallback"`) —
+batch start/end summaries, and dedup refresh results. Gitignored like
+other runtime output (`backend/logs/`).
+
+## Running the tests (`pyez/mock_device.py`, `pipeline.run_deduplicated_tests`)
+
+Closes the loop from "generate a test" to "prove it actually runs,"
+without a real vJunos-router/vMX lab:
+
+- **`backend/pyez/mock_device.py`** — `MockJunosDevice` (constructor
+  signature matches `jnpr.junos.Device`; `.open()`/`.close()` are no-ops,
+  `.rpc` dynamically returns a `MockRpcResponse` for any attribute
+  access, mirroring PyEZ's per-RPC-tag method pattern) and `MockConfig`
+  (context manager; `.load()`/`.commit()` record but don't apply
+  anything). `MockRpcResponse.findtext(xpath)` pattern-matches the XPath
+  string (`peer-state`→`"Established"`, `neighbor-state`→`"Full"`,
+  `as-path`→`"65001"`, `sequence-number`→`"0x80000001"`, etc.), falling
+  back to a generic placeholder — a demo/smoke-test double, explicitly
+  **not** a protocol simulator; it can't fabricate a real negative-path
+  outcome for a test that actually needs a peer emulator to construct its
+  stimulus.
+- **Injection mechanism**: `refresh_deduplicated_tests()` writes a
+  `conftest.py` into `generated_tests/deduplicated/pytest/` on every
+  refresh (its `*.py`-glob cleanup would otherwise delete it, so it can't
+  be a plain static file living there — `pipeline.CONFTEST_CONTENT` is
+  rewritten alongside the tests each time). That `conftest.py` shims
+  `sys.modules["jnpr.junos"]`/`sys.modules["jnpr.junos.utils.config"]`
+  with the mock classes *before* pytest imports the generated test files
+  (conftest.py always loads first for its directory) — PyEZ isn't a real
+  project dependency, so there's nothing genuine to conflict with.
+- **`pipeline.run_deduplicated_tests()`** shells out to a real `pytest`
+  subprocess (`sys.executable -m pytest ... --junitxml=...`) against
+  `generated_tests/deduplicated/pytest` — a genuine test run, not a
+  simulation of one. Parses pytest's own built-in JUnit XML report (no
+  extra plugin dependency) into a structured pass/fail/error summary with
+  per-test duration and failure message. New dependency: `pytest>=8.0.0`
+  (`backend/requirements.txt`) — the app itself never imported it before.
+- **API**: `POST /api/tests/run`. **UI**: "Run deduplicated tests" button +
+  results table in the Test Catalog tab (`app.js:renderRunTestsResult`).
+- **Verified live, twice** (direct call and real HTTP): 39 tests, 36
+  passed, 0 errored — 0 errored is the important number, since a broken
+  mock injection would show up as 39 import errors, not partial failures.
+  The 3 failures were inspected and are legitimate, not bugs: one expects
+  a route to be genuinely absent (the generic mock always returns a
+  placeholder instead), one expects a rejected/non-Established outcome
+  from a test that actually needs a peer emulator to construct its real
+  stimulus, one expects an exact literal IP the mock was never told about.
+  This is stated plainly in the UI description and README, not hidden.
+
 ## Key management today
 
 `ANTHROPIC_API_KEY` lives in `backend/.env` (gitignored per the README's
@@ -278,10 +398,19 @@ key for this POC to demo AI reasoning.
 Real: RFC→requirement extraction, persistent KB, TF-IDF retrieval, AI Test
 Intent generation with schema validation + safety-checked assertions, live
 generation from the UI, coverage/gap computation, existing-test upload +
-AI-reviewed coverage mapping, RFC re-ingestion.
+AI-reviewed coverage mapping, RFC re-ingestion, deduplication, and now
+**actual test execution** — `generated_tests/deduplicated/pytest` runs for
+real via `pytest` against a mocked PyEZ layer, no lab required.
 
-Stubbed: generated pytest files use placeholder lab host/credentials (no real
-lab wired up); negative/boundary/malformed-message tests still need a peer
-emulator (ExaBGP/Scapy) that this tool identifies the need for but doesn't
-generate; anything below "high" AI confidence is explicitly marked
-`needs_review`, not silently trusted.
+Stubbed: generated pytest files use placeholder lab host/credentials for
+*real* execution — wiring to an actual vJunos-router/vMX lab still means
+swapping the mock back out for real PyEZ/device credentials; negative/
+boundary/malformed-message tests still need a peer emulator (ExaBGP/Scapy)
+that this tool identifies the need for but doesn't generate, and the mock
+runner can't fake that outcome either (see the "Running the tests" section
+above — those specific tests may pass or fail against the mock without
+that meaning anything about real conformance). Confidence still drives
+`needs_review` independently of whether an assertion was safe enough to
+promote to executable — a promoted, passing-against-the-mock assertion
+from a low-confidence Test Intent is still flagged for a human to check
+the reasoning behind it.
