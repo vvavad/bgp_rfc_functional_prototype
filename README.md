@@ -16,10 +16,24 @@ placeholder templates) rather than silently assuming BGP.
 ## Run it
 
 ```bash
+cp backend/.env.example backend/.env    # defaults to AI_BACKEND=auto -- see below
+make install                            # creates backend/.venv, installs requirements.txt into it
+make run
+```
+
+`make install` creates an isolated virtualenv at `backend/.venv` and installs
+`backend/requirements.txt` into it — required, not optional, on any modern
+Debian/Ubuntu (including WSL2 Ubuntu 24.04+): those ship pip in "externally
+managed environment" mode (PEP 668) and refuse a bare `pip install` outright.
+`make run`/`make run-empty` (and every other Makefile target that needs the
+app's dependencies) use this same venv automatically — nothing to activate.
+If you'd rather manage your own environment (already have a venv active,
+different Python version, etc.), the equivalent manual steps are:
+
+```bash
 cd backend
-pip install -r requirements.txt
-cp .env.example .env    # defaults to AI_BACKEND=auto -- see below
-python app.py
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python app.py
 ```
 
 `backend/.env` is loaded automatically on every startup (via `python-dotenv`) —

@@ -692,3 +692,146 @@ that meaning anything about real conformance). Confidence still drives
 promote to executable — a promoted, passing-against-the-mock assertion
 from a low-confidence Test Intent is still flagged for a human to check
 the reasoning behind it.
+
+## Relevance to HPE Juniper test engineering — and where the honest limits are
+
+This POC was built for HPE Juniper's test engineering context specifically,
+not as a generic "AI writes tests" demo, so it's worth being direct about
+whether the approach actually maps to real problems that team has, versus
+what current AI capability can actually be trusted to do. Short answer:
+**yes, directionally** — the mechanisms here target genuine, expensive,
+currently-manual bottlenecks, and the architecture is a realistic reflection
+of what an LLM can be trusted to do unsupervised today (not much) versus
+under review (quite a lot). It is not itself a production tool; see the
+gaps at the end of this section for what turning it into one would take.
+
+### The real bottleneck this targets
+
+Conformance test suites for protocols like BGP/OSPF/IS-IS get built by an
+engineer manually reading dense normative RFC text and hand-deriving test
+cases from it. That's not a hypothetical inefficiency — RFC 4271 alone
+decomposes into 203 individually-testable MUST/SHOULD/MAY statements (this
+POC's own extraction count, cross-checked against a naive whole-document
+recount in the "confirmed extraction-recall gap" section above), spread
+across roughly 100 pages, and BGP is one protocol among the several Juniper
+ships and tests. Three specific, recurring costs fall out of that:
+
+- **Traceability is usually tribal knowledge, not structured data.** "Which
+  test proves we handle §6.3's UPDATE error-handling MUST-clauses" typically
+  lives in an engineer's memory, a stale wiki page, or nowhere — not in a
+  queryable table. That makes conformance audits, certification
+  conversations, and onboarding a new engineer onto an existing suite all
+  harder than they should be.
+- **Coverage is invisible until it isn't.** Without a live
+  requirement-to-test map, "what fraction of this RFC do we actually test"
+  is a question someone has to manually re-derive, usually only after an
+  interop failure or a customer escalation prompts it.
+- **Specs and suites drift apart over time.** RFCs get errata and companion
+  documents; existing suites accumulate across years and engineers. Nobody
+  can confidently say "we already cover requirement X" without re-reading
+  the test, and coverage against a spec *delta* is almost never re-checked.
+
+### What in this POC maps to each of those
+
+Not as generic claims — specific mechanisms already built and exercised:
+
+- **Structured extraction into a persistent `requirements` table**
+  (`RFC4271-S5.1.1-REQ-01`-style IDs) makes traceability a property of the
+  data model, not a wiki page that goes stale.
+- **`test_intents` linking test ↔ requirement ↔ category ↔ confidence**,
+  queried live by `get_coverage()`/`get_matrix()`, turns "what fraction do
+  we cover" into a dashboard number instead of a manual audit.
+- **Existing-test upload + AI-reviewed coverage mapping**
+  (`analyze_uploaded_test_coverage`) targets the legacy-suite problem
+  directly — map what a team already has against RFC requirements without
+  requiring a suite rewrite first.
+- **Incremental knowledge-library ingestion** (see above) mirrors how specs
+  actually get worked through in practice — in sections, revisited over
+  time — rather than assuming every RFC arrives once, whole, and untouched
+  afterward.
+- **The `ProtocolProfile` abstraction** acknowledges Juniper tests many
+  protocols, not one — adding IS-IS/MPLS/EVPN coverage is a new profile
+  (category rules, topology, config template, observation call), not a
+  rewrite of the ingestion/generation pipeline.
+
+### Why the architecture is shaped this way — a realistic read of current AI capability
+
+The constraints baked into this design aren't hedges bolted on reluctantly —
+they're the correct shape given what a model like Claude can actually be
+trusted to do today:
+
+- **Narrow task, not open-ended authority.** Given one normative sentence
+  plus a little retrieved context, reasoning about what's protocol-
+  observable and drafting a structured test plan is a well-scoped task
+  current models are genuinely good at. "Write our whole conformance suite
+  unsupervised" is not the task this asks of the model, deliberately.
+- **The model never writes executable code** — only a schema-validated Test
+  Intent; template rendering and AST-safety-checked assertion promotion are
+  the only things that produce doc/pytest text (see "AI integration"
+  above). That boundary exists because LLM output isn't reliable enough yet
+  to trust unsupervised when the output becomes code that runs — a direct,
+  honest response to a real, current limitation, not a hypothetical one.
+- **Confidence/`needs_review` grading instead of binary trust** matches how
+  a real team would actually want to consume AI-drafted tests: as a graded
+  first draft that's always reviewed before it's trusted in an official
+  suite — exactly what `demo_1_questions.md` says outright ("Is this meant
+  to replace manual test-writing entirely? No").
+- **Every AI path has a heuristic fallback.** The tool never hard-fails on
+  a bad/missing model response — it degrades to a lower-confidence,
+  visibly-flagged result. That's the correct posture for something meant to
+  run unattended in a pipeline, not just live in front of a presenter.
+- **The key-less Claude Code CLI backend is a real adoption enabler, not a
+  demo trick.** In a security-conscious enterprise like HPE Juniper,
+  provisioning a separate `ANTHROPIC_API_KEY` per engineer or CI runner is
+  its own procurement/security-review cycle. Reusing an already-approved,
+  already-authenticated Claude Code session removes exactly that friction —
+  in practice, often the actual adoption blocker, more than raw model
+  capability.
+- **The recent cost/quota controls** (`GENERATE_ALL_CAP_ENABLED`/
+  `GENERATE_ALL_CAP_COUNT`, a cheaper default model) reflect a real,
+  non-hypothetical concern: a team generating tests at scale across many
+  RFCs needs predictable, bounded spend, not "click a button and hope" —
+  this stopped being theoretical the moment a real demo-verification run
+  exhausted a real quota (see the "Cost/quota controls" section above).
+
+### Where the honest limits are
+
+Consistent with how this document treats every other gap — named directly,
+not hidden:
+
+- **Negative/malformed-message conformance — a large, important fraction of
+  real conformance testing — still needs a peer emulator** (ExaBGP/Scapy)
+  this tool identifies the need for (`requires_peer_emulator`) but doesn't
+  build. That's still real, unautomated engineering work.
+- **Tests run today against a mock PyEZ layer, not real vJunos-router/vMX
+  hardware.** That proves the generation-to-execution pipeline works, not
+  real-device conformance. Real-lab wiring is explicitly still stubbed.
+- **Extraction has a known under-segmentation gap** (see "A confirmed
+  extraction-recall gap" above) — lettered/numbered sub-lists collapse into
+  one oversized requirement, so "203 requirements" is a lower bound on true
+  count, not a verified-complete decomposition. Treat extraction counts as
+  a floor, not a certified total, until that's fixed.
+- **AI-drafted content isn't reproducible run-to-run** — the same
+  requirement can generate different wording/steps on a different call.
+  Fine for a first draft; wrong mental model if someone expects
+  deterministic golden tests out of this.
+- **This is a standalone dashboard/DB, not integrated into whatever real
+  test-management/CI/lab-scheduling system HPE Juniper's test engineering
+  team actually runs.** Real adoption is an integration project on top of
+  this, not a switch to flip.
+- **Confidence scoring reduces but doesn't eliminate the need for a domain
+  expert to review every generated test before it's trusted.** Any rollout
+  plan needs to budget real engineer review time as a line item, not assume
+  it away because a model produced the first draft.
+
+### Verdict
+
+The approach is worth funding as a real project — it targets genuine,
+expensive, currently-manual bottlenecks (extraction, traceability, coverage
+accounting, legacy-suite mapping), and its guardrails reflect a realistic,
+non-overclaiming read of what LLMs can be trusted to do today: draft and
+flag for review, never unsupervised authority. It is evidence the direction
+is sound, not evidence the problem is already solved — the gaps above are
+the actual scope of the next phase, not footnotes. See `ideas.md` for
+specific next investments already identified (peer-emulator integration, a
+third protocol profile, real-lab mode) if this moves forward.

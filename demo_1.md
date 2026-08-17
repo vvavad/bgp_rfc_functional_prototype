@@ -26,11 +26,19 @@ mechanism this script demonstrates, an uncapped run is purely optional
 polish for a fuller-looking catalog.
 
 A root `Makefile` wraps every terminal action below as a target
-(`make status`, `make library`, `make ingest FILE=...`, `make generate-all`,
-`make run-tests`, `make demo-incremental`) — this script shows the
-UI-clicking version for a live audience, with the equivalent `make` command
-called out alongside each step for a more technical audience or for your own
-sanity-checking. Run `make` with no target to see the full list.
+(`make install`, `make run`/`make run-empty`, `make ai-status`, `make
+status`, `make library`, `make ingest FILE=...`, `make generate-category
+CATEGORY=...`, `make generate-all`, `make run-tests`, `make dedup-refresh`,
+`make clear-uploads`, `make reset-demo`, `make demo-incremental`) — this
+script shows the UI-clicking version for a live audience, with the
+equivalent `make` command called out alongside each step for a more
+technical audience or for your own sanity-checking. Run `make` with no
+target to see the full list. **`make install` creates and uses an isolated
+virtualenv at `backend/.venv` for all of this** — required on modern
+Debian/Ubuntu (including WSL2 Ubuntu 24.04+), which refuses a bare `pip
+install` outright (PEP 668, "externally-managed-environment"); every
+Makefile target that needs the app's Python dependencies goes through that
+same venv automatically, so there's nothing to activate or remember.
 
 ---
 
@@ -82,7 +90,13 @@ cp backend/kb/retrieval_index.pkl /tmp/poc_demo_backup/ 2>/dev/null
 rm -rf /tmp/poc_demo_backup/generated_tests
 cp -r backend/generated_tests /tmp/poc_demo_backup/
 
-# 1b. Confirm dependencies are installed.
+# 1b. Create the virtualenv and install dependencies into it (backend/.venv).
+#     Required, not optional, on any modern Debian/Ubuntu including WSL2
+#     Ubuntu 24.04+ -- those refuse a bare `pip install` outright with
+#     "externally-managed-environment" (PEP 668). Every other command in
+#     this script that needs the app's Python dependencies goes through
+#     this same venv via a Makefile target -- there's no bare `python3 -c`
+#     left anywhere in this script for exactly that reason.
 make install
 
 # 1c. Confirm an AI backend will actually be used, not the heuristic
@@ -91,10 +105,7 @@ make install
 #     a key), you're good. If it prints False, the demo still works but
 #     every test will be watermarked "heuristic-fallback" instead of
 #     showing real AI reasoning -- fix this before presenting.
-cd backend && python3 -c "
-import pipeline
-print(pipeline.get_ai_status())
-" && cd ..
+make ai-status
 
 # 1d. Clear the knowledge base, generated tests, and process log so the
 #     Knowledge Library demo starts from a genuinely empty state.
@@ -185,6 +196,9 @@ API — not pasted into a form each time.
    cell).
 2. Pick a category with gaps (e.g. `path_attribute` or `error_handling`)
    and click **"Generate 5 tests for this category."**
+   *(Terminal alternative: `make generate-category CATEGORY=path_attribute`
+   — add `COUNT=N` to change how many; check `make coverage` first if
+   you're not sure which category names currently have gaps.)*
 3. While it's running (a few seconds to ~30s per test, depending on the
    backend), narrate: "Right now, for each requirement, we're pulling the
    requirement text plus the nearest related requirements from the same
@@ -460,6 +474,19 @@ protocol-aware, not hardcoded to BGP. Prove it by swapping in OSPF.
 
 4. Click **"Re-ingest pasted text & rebuild knowledge base,"** confirm the
    replace-everything dialog.
+   *(Terminal alternative — no UI confirmation dialog to click through, so
+   this is genuinely faster from a terminal: save the OSPF excerpt above to
+   `/tmp/ospf.txt`, then build and send the JSON payload with it, e.g.:*
+   ```bash
+   $(pwd)/backend/.venv/bin/python3 -c "
+   import json
+   print(json.dumps({'rfc_number': '2328', 'rfc_title': 'OSPF Version 2',
+                      'raw_text': open('/tmp/ospf.txt').read()}))
+   " > /tmp/ospf_payload.json
+   curl -s -X POST http://localhost:5000/api/ingest \
+     -H "Content-Type: application/json" -d @/tmp/ospf_payload.json
+   ```
+   *— tested working during this script's own verification.)*
 5. Watch the header update: *"OSPF (Open Shortest Path First) —
    Conformance Coverage."* Point out the Coverage Matrix now shows OSPF
    categories — `neighbor_adjacency`, `lsa_flooding`, `spf_calculation`,
@@ -513,12 +540,7 @@ cp -r /tmp/poc_demo_backup/generated_tests/pytest backend/generated_tests/pytest
 # Confirm the restore worked, then rebuild the deduplicated view (and its
 # conftest.py) from the restored DB -- don't try to cp -r it back from the
 # backup, the DB is the source of truth and this regenerates it correctly.
-cd backend && python3 -c "
-import pipeline
-print(pipeline.get_rfc_meta())
-print(pipeline.get_coverage()['tests_generated'], 'tests restored')
-print(pipeline.refresh_deduplicated_tests())
-" && cd ..
+make dedup-refresh
 ```
 
 Once you've confirmed the numbers match what you backed up (your numbers
@@ -535,13 +557,7 @@ If you uploaded any sample files during an optional Gap Analysis / existing-
 test-upload detour, remove them too so the next demo starts clean:
 
 ```bash
-cd backend && python3 -c "
-import pipeline
-for t in pipeline.get_uploaded_tests():
-    pipeline.delete_uploaded_test(t['id'])
-for a in pipeline.get_artefacts():
-    pipeline.delete_artefact(a['id'])
-" && cd ..
+make clear-uploads
 ```
 
 Restart the app one last time (`make run`) and confirm the dashboard looks
