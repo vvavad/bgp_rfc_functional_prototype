@@ -56,7 +56,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
 
-AI_MODEL = os.environ.get("AI_MODEL", "claude-opus-4-8")
+AI_MODEL = os.environ.get("AI_MODEL", "claude-sonnet-5")
 
 # Which backend(s) to try, in order. "auto" (default) prefers the local
 # Claude Code CLI -- already authenticated via that session's own login, no

@@ -225,8 +225,13 @@ a team's real test isn't double-counted.
   for `/api/status` (`ai.backend`) and per-generated-test provenance
   (`test_intents.ai_backend`, migrated in via `pipeline._migrate` for DBs
   created before this column existed).
-- Model: `claude-opus-4-8` by default, overridable via `AI_MODEL` — applies
+- Model: `claude-sonnet-5` by default, overridable via `AI_MODEL` — applies
   to whichever backend answers (CLI accepts the same aliases/full names).
+  Was `claude-opus-4-8` originally; changed after a real Claude Code quota
+  got exhausted during demo verification (see the "Cost/quota controls"
+  note below) — Opus stays available as an explicit override for a real
+  presentation, but shouldn't be the thing silently burning quota on every
+  rehearsal/bulk-fill run.
 - **Design rule that matters:** the model never writes Python. It returns a
   schema-validated JSON "Test Intent" (test type, risk, protocol reasoning,
   steps, PyEZ observation point, and a `checks` list — see below).
@@ -484,7 +489,15 @@ function exists alongside it instead.
   /api/generate-all`) now runs this as a second pass after its existing
   gap-fill, so one "generate tests" action reports both `created` and
   `modified` — the "few tests modified because of new knowledge" half of the
-  demo, alongside the "new tests created" half.
+  demo, alongside the "new tests created" half. Runs across the same
+  `ThreadPoolExecutor`/`GENERATION_CONCURRENCY` pattern as `generate_tests()`
+  (fan the `_generate_one` calls out concurrently, then write files/DB rows
+  back sequentially) — this ran one requirement at a time in the first cut,
+  which a real batch caught during live verification (11 flagged tests
+  taking noticeably longer than the equivalently-sized "create" pass, since
+  neither is CPU-bound); fixed and re-verified (regenerated set matched the
+  flagged set exactly; a synthetic-delay timing test confirmed ~2s for 8
+  items instead of the ~8s the sequential version would take).
 - **Bootstrap conflict, found by actually running this end to end (not just
   reading the diff):** `app.py`'s existing first-run bootstrap ingests the
   *entire* bundled `kb/rfc4271_raw.txt` via the destructive `ingest_rfc()`
@@ -507,6 +520,55 @@ function exists alongside it instead.
   regenerated all 37 flagged ones, landing at 196 tests / 100% automatable
   coverage across the full 203-requirement RFC — with zero `ast.parse`
   failures and a clean mocked-`pytest` run afterward.
+
+## Cost/quota controls (`GENERATE_ALL_CAP_ENABLED`/`GENERATE_ALL_CAP_COUNT`)
+
+The incremental-ingestion story above makes it easy to trigger a very large
+real-AI batch by design — "ingest more, generate all remaining gaps" is
+exactly the point. That's also exactly what exhausted a real Claude Code
+quota during demo verification: `generate_all_gaps()`/`POST
+/api/generate-all` had no default cap, so two clicks on a freshly-ingested
+full RFC could fire 150-200+ real `claude` CLI subprocess calls, each a
+real, potentially paid completion — on top of `AI_MODEL` defaulting to the
+priciest available tier at the time (`claude-opus-4-8`).
+
+- **`pipeline.GENERATE_ALL_CAP_ENABLED`/`GENERATE_ALL_CAP_COUNT`** (env
+  vars, default `true`/`20`): `generate_all_gaps()`'s `limit` parameter now
+  has three states instead of two — omitted (apply the env-configured cap,
+  or none if disabled), an explicit positive int (used exactly, same as
+  always), or `-1` (explicit "generate everything remaining regardless of
+  the cap" override). Scoped to this one bulk endpoint specifically, not
+  `/api/generate`/`/api/generate-by-category`, which already take an
+  explicit caller-controlled count/id-list and aren't the
+  silently-fires-100+-calls risk surface. The response gains
+  `gaps_remaining_uncapped` (>0 only when the cap actually truncated the
+  batch) so a capped run doesn't look like "everything's done" when it
+  isn't.
+- **`AI_MODEL` default changed to `claude-sonnet-5`** (see the "AI
+  integration" section above) — model tier is a far bigger per-call cost
+  lever than prompt size, and Opus-by-default meant every rehearsal/bulk-
+  fill paid Opus pricing regardless of whether that reasoning quality was
+  needed for that particular run. Opus remains a one-line `.env` override
+  for an actual presentation.
+- **A related, separately-found bug**: `~/.claude.json` (a personal Claude
+  Code config, not project source) had `hasTrustDialogAccepted: false` for
+  this project path. Under concurrent bulk-generation load, some fraction
+  of `claude -p` subprocess calls intermittently failed with a "workspace
+  has not been trusted" error and fell back to heuristic mode — wasted
+  wall-clock and lower-quality output (though this appears to fail before
+  reaching the model, so likely not wasted spend specifically). Fixed by
+  setting that one flag to `true` for this project path, equivalent to
+  accepting the trust dialog interactively once.
+- **What this doesn't fix**: none of the above reduces the token cost of a
+  given real AI call — only how many calls happen by default and which
+  model tier answers them. If deeper savings are ever needed, the two
+  higher-effort levers are switching to `AI_BACKEND=api` (a direct
+  Anthropic API call per test, instead of a full `claude` CLI subprocess
+  spin-up per test) and adding prompt-caching (`cache_control`) to
+  `AnthropicAPIBackend` for the per-protocol system prompt, which is
+  currently sent in full on every single call — deliberately not done here
+  since it requires provisioning `ANTHROPIC_API_KEY`, trading away the
+  key-less demo story for a cost optimization that wasn't asked for.
 
 ## Deduplication (`pipeline.refresh_deduplicated_tests`)
 

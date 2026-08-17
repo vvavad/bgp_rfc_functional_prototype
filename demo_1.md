@@ -9,9 +9,21 @@ re-touch the raw RFC text → protocol-agnostic support (BGP + OSPF)**.
 Includes cleanup before the first run and after the demo, so the
 environment is left exactly as it was found.
 
-Total runtime: ~35-40 minutes at a comfortable pace (the incremental
+Total runtime: ~25-30 minutes at a comfortable pace with the default
+generation cap (see below); add ~10-15 minutes if you choose the optional
+uncapped full-RFC generation called out in steps 5/8. The incremental
 knowledge-growth section, steps 3/5/7/8, is the newest and most important
-addition — don't cut it for time before cutting the OSPF section instead).
+addition — don't cut it for time before cutting the OSPF section instead.
+
+Every real test generation is a real, potentially paid Claude Code call.
+`POST /api/generate-all` (used by the "Generate all remaining gaps" button
+and `make generate-all`) is capped by default —
+`GENERATE_ALL_CAP_ENABLED`/`GENERATE_ALL_CAP_COUNT` in `backend/.env`,
+20 by default — specifically so a rehearsal run of this script can't
+silently burn through 100+ real model calls. Steps 5 and 8 call this out
+explicitly where it matters; the default cap is enough to prove every
+mechanism this script demonstrates, an uncapped run is purely optional
+polish for a fuller-looking catalog.
 
 A root `Makefile` wraps every terminal action below as a target
 (`make status`, `make library`, `make ingest FILE=...`, `make generate-all`,
@@ -198,22 +210,35 @@ API — not pasted into a form each time.
      AI's suggested assertion — promoted to a real, executable `assert`
      line whenever it passes a static safety check, otherwise left as a
      commented suggestion with `needs_review` set.
-6. Now click **"Generate all remaining gaps"** in the Gap Analysis tab to
-   fully cover this first half of the RFC before moving on — this sets up
-   the payoff in step 8. **This can take several minutes for a full batch**
-   (roughly a few seconds per test, several running concurrently) — use the
-   wait to walk through the **Coverage Matrix** tab (section × category
-   grid) and try the **Overview tab's semantic search box** (e.g. search
-   "hold timer expired" and show it's the same retrieval index feeding AI
-   context, exposed directly).
-   *(Terminal alternative: `make generate-all` — or cap it with a smaller
-   batch first via `curl -X POST localhost:5000/api/generate-all -d
-   '{"limit": 20}' -H "Content-Type: application/json"` if you're short on
-   time; a smaller batch here just means a smaller "modified" count later.)*
-7. Once it finishes: **~102 tests generated, 100% automatable coverage** for
-   this first half of the RFC (out of 107 requirements, ~5 are flagged
-   `not_independently_observable` — the coverage math already accounts for
-   that, it's not a gap).
+6. Now click **"Generate all remaining gaps"** in the Gap Analysis tab.
+   **Every real AI call is a real, potentially paid Claude Code call, so
+   this is capped by default** (`GENERATE_ALL_CAP_ENABLED`/
+   `GENERATE_ALL_CAP_COUNT` in `backend/.env`, default 20) — one click
+   generates up to 20 tests, not the whole remainder, and takes at most a
+   couple of minutes (roughly a few seconds per test, several running
+   concurrently). That's a deliberate, quota-conscious default: you don't
+   need to fully drain every gap for the rest of this demo to land, one
+   capped batch is plenty to show the mechanism.
+   *(Terminal alternative: `make generate-all` — same default cap applies
+   automatically, no flag needed.)*
+7. Once it finishes, the status line reads something like **"Done — 20
+   test(s) created."** and the response also carries
+   `gaps_remaining_uncapped` (how many are still left uncovered at this
+   category/section) — point that out as the honest "there's more if you
+   want it" signal instead of a batch quietly looking like "everything's
+   done."
+   - **If you want to fully cover this first half for a more complete
+     showcase** (optional, costs more real AI calls — do this only if
+     you've confirmed you have quota headroom): click the same button a
+     few more times, or bypass the cap for one big batch via the terminal:
+     `curl -X POST localhost:5000/api/generate-all -d '{"limit": -1}' -H
+     "Content-Type: application/json"`. A full, uncapped part-1 batch is
+     ~102 tests (out of 107 requirements — ~5 are flagged
+     `not_independently_observable`, which the coverage math already
+     accounts for, not a gap) and can take several minutes; use the wait to
+     walk through the **Coverage Matrix** tab and the **Overview tab's
+     semantic search box** (e.g. search "hold timer expired" and show it's
+     the same retrieval index feeding AI context, exposed directly).
 
 **Key line to land here:** "The model never wrote this Python file. It
 returned JSON — test type, reasoning, steps, a list of checks. This
@@ -285,7 +310,7 @@ This is where the story stops being "ingest once, use forever" and becomes
 
 ---
 
-## 8. Generate again — new tests *and* modified tests (~4-6 min)
+## 8. Generate again — new tests *and* modified tests (~2-6 min, depends on how much of part 1 you generated in step 5)
 
 This is the payoff for the whole incremental story, and the direct answer
 to "show me knowledge actually being added, not just re-labeled."
@@ -293,12 +318,21 @@ to "show me knowledge actually being added, not just re-labeled."
 1. Go to **Gap Analysis** → **"Generate all remaining gaps"** again.
    *(Terminal alternative: `make generate-all`)*
 2. While it runs, narrate: "This single action is doing two things now.
-   It's filling every gap opened by the 96 requirements we just added — same
-   as before. But it's also re-running generation for every test flagged in
-   the last step, with the fuller context those requirements now provide."
+   It's filling gaps opened by the 96 requirements we just added — same as
+   before, capped by default just like last time. But it's *also*
+   re-running generation for **every single test** flagged in the last
+   step, with the fuller context those requirements now provide — that part
+   deliberately isn't capped, because leaving some tests silently
+   describing stale, pre-ingest reasoning would defeat the whole point."
 3. When it finishes, read the status line out loud — it now reports **both**
    numbers:
-   > *Done — 94 test(s) created, N modified.*
+   > *Done — N test(s) created, M modified.*
+
+   Exactly how big M is depends on how much of part 1 you generated in step
+   5 (only tests that already exist can be flagged stale) — with a full,
+   uncapped part 1 (107 requirements, ~102 tests) this was **37 modified**
+   when last verified end to end; with the smaller default-capped batch
+   from step 5, expect a smaller but still real, non-zero number.
 4. Open the **Test Catalog** tab. Point out:
    - New rows for the second half of the RFC, same as any other batch.
    - A **`modified`** pill on rows that existed *before* this batch — hover
@@ -339,7 +373,9 @@ second look."
    (`if count == 0`) sees requirements already in the DB and skips straight
    to `app.run()`, so it behaves identically either way once there's data.
    The console prints nothing about ingestion. Reload the browser: same 203
-   requirements, same 196-ish test catalog, instantly — no re-parse delay.
+   requirements, same test catalog size as before the restart (however many
+   you generated in steps 5/8 — 196 if you did the full uncapped run),
+   instantly — no re-parse delay.
 3. **Optional, for a technical audience — the convincing version:**
    temporarily move the two source files this demo actually used out of the
    way, and prove the app doesn't need them anymore:
@@ -522,7 +558,12 @@ the audience wants more:
   `make demo-incremental` runs steps 3/5 (part 1)/7/8 end to end as `curl`
   calls, printing each response — good for an engineering audience that
   wants to see the raw API contract (`created`/`modified`/
-  `flagged_stale_test_ids`) instead of watching the dashboard.
+  `flagged_stale_test_ids`) instead of watching the dashboard. Same default
+  generate-all cap applies here too (it's server-side, not a UI-only
+  restriction) — this target won't fire an uncapped 100+-call batch on its
+  own; edit the curl calls it runs (or export `GENERATE_ALL_CAP_ENABLED=false`
+  before starting the server) if you specifically want an uncapped run from
+  this target.
 - **Gap Analysis → upload an existing test.** Upload a sample pytest file,
   click Analyze, and show the AI deciding whether it *actually* verifies
   specific RFC requirements (not just topical overlap) — matched

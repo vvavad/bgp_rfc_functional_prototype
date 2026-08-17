@@ -171,7 +171,12 @@ def api_generate_all():
     """Bulk-fill every remaining automatable gap in one call -- the action
     that actually raises the out-of-the-box coverage number, as opposed to
     the demo-scale seed package or the 5-at-a-time per-category buttons.
-    Optional {limit} caps how many gaps get filled in this call."""
+    Optional {limit}: a positive int caps how many gaps get filled in this
+    call; omit it to use the env-configured default cap
+    (GENERATE_ALL_CAP_ENABLED/GENERATE_ALL_CAP_COUNT, see pipeline.py --
+    exists specifically so this endpoint can't silently trigger 100+ real
+    AI calls from one request); pass -1 to explicitly bypass the cap and
+    generate everything remaining regardless of the env default."""
     body = request.get_json(force=True) or {}
     limit = body.get("limit")
     result = pipeline.generate_all_gaps(batch_label="bulk-fill-all-gaps", limit=int(limit) if limit else None)

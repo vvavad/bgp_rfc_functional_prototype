@@ -77,9 +77,10 @@ doc/pytest text is produced.
   heuristic — see `.env.example`. Every generated test's catalog entry
   records which one actually answered (`ai_backend` field), and the header/
   catalog badges reflect it too.
-- **Model:** `claude-opus-4-8` by default (set via the `AI_MODEL` env var if
-  you want to trade quality for cost/speed, e.g. `claude-sonnet-5`) — applies
-  to whichever backend is active.
+- **Model:** `claude-sonnet-5` by default — a cost/quality balance suited to
+  demos and bulk generation (set via the `AI_MODEL` env var to trade
+  cost/speed for quality, e.g. `claude-opus-4-8` for a real presentation) —
+  applies to whichever backend is active.
 - **Grounding, not a bare prompt:** the model is given the target requirement
   plus 3 semantically related requirements retrieved from the same persisted
   knowledge base (`/api/search`'s TF-IDF index) — real hybrid retrieval, the
@@ -295,7 +296,7 @@ shows every `TESTS_GENERATED` event tagged with its generation mode.
 | GET | `/api/existing-tests` | uploaded existing tests + their AI-reviewed RFC coverage status |
 | POST | `/api/generate` | `{requirement_ids: [...], label, derived_from}` |
 | POST | `/api/generate-by-category` | `{category, count}` — generate N tests for a gap category |
-| POST | `/api/generate-all` | `{limit?}` — bulk-fill every remaining automatable gap (optionally capped) in one call, running concurrently (`AI_GENERATION_CONCURRENCY`, default 4); response includes both `created` (new tests) and `modified` (existing tests regenerated because a knowledge-library ingest added related knowledge since they were last generated) |
+| POST | `/api/generate-all` | `{limit?}` — bulk-fill remaining automatable gaps, running concurrently (`AI_GENERATION_CONCURRENCY`, default 4). Each gap is a real AI call, so this is capped by default (`GENERATE_ALL_CAP_ENABLED`/`GENERATE_ALL_CAP_COUNT`, default 20) to avoid silently burning through 100+ real model calls from one request — omit `limit` to use that default cap, pass an explicit positive `limit` to use exactly that number, or `limit: -1` to bypass the cap and generate everything remaining. Response includes `created` (new tests), `modified` (existing tests regenerated because a knowledge-library ingest added related knowledge since they were last generated), and `gaps_remaining_uncapped` (>0 only if the cap actually truncated this batch) |
 | POST | `/api/ingest` | `{rfc_number, rfc_title, raw_text, protocol?}` — replace the knowledge base with pasted text (`protocol` optionally overrides auto-detection, e.g. `bgp`/`ospf`/`generic`) |
 | POST | `/api/ingest/upload` | multipart `{rfc_number, rfc_title, rfc_file, protocol?}` (.txt/.md/.pdf) — same as above, from an uploaded file |
 | POST | `/api/artefacts/upload` | multipart `{artefact_type, file}` (.txt/.md/.pdf) — upload a product spec or other reference material |

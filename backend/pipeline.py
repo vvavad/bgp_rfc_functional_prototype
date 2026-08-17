@@ -35,6 +35,17 @@ logger = logging.getLogger(__name__)
 # machine -- override via env var if the local box can take more/less.
 GENERATION_CONCURRENCY = max(1, int(os.environ.get("AI_GENERATION_CONCURRENCY", "4")))
 
+# Default safety cap on generate_all_gaps()/"POST /api/generate-all" -- an
+# uncapped bulk-fill call can trigger one real AI call per remaining gap
+# (potentially 100+ for a freshly-ingested RFC), each a real Claude Code
+# CLI/API call against a paid quota. Caps by default so a single click/API
+# call can't silently burn through a large batch of real model calls;
+# GENERATE_ALL_CAP_ENABLED=false restores the old unlimited-by-default
+# behavior, and an explicit `limit` in the request always overrides this
+# (see generate_all_gaps below -- limit=-1 means "everything, no cap").
+GENERATE_ALL_CAP_ENABLED = os.environ.get("GENERATE_ALL_CAP_ENABLED", "true").strip().lower() != "false"
+GENERATE_ALL_CAP_COUNT = max(1, int(os.environ.get("GENERATE_ALL_CAP_COUNT", "20")))
+
 BASE = Path(__file__).resolve().parent
 KB_DIR = BASE / "kb"
 DOCS_DIR = BASE / "generated_tests" / "docs"
@@ -1802,17 +1813,39 @@ def generate_all_gaps(batch_label: str = "bulk-fill-all-gaps", limit: int = None
     seed or 5-at-a-time per-category buttons. This is what actually moves
     the out-of-the-box coverage number -- the seed package only exists so
     the dashboard isn't empty on first launch; this is the "make coverage
-    real" action. `limit` caps how many gaps to fill in one call (useful to
-    avoid a single very long-running request); omit for all of them.
+    real" action.
+
+    `limit` semantics (each real generation is a real, potentially paid AI
+    call -- an uncapped bulk-fill on a freshly-ingested RFC can mean 100+ of
+    them from one call, which is exactly what exhausted a real Claude Code
+    quota during demo verification):
+    - omitted / None: caller expressed no preference, so the
+      GENERATE_ALL_CAP_ENABLED/GENERATE_ALL_CAP_COUNT env-configured default
+      applies (capped to GENERATE_ALL_CAP_COUNT unless that's disabled).
+    - -1: explicit "generate everything remaining, no cap" override,
+      regardless of the env-configured default -- for when you deliberately
+      want the full batch.
+    - a positive int: used exactly as given, same as before -- an explicit
+      caller value always wins over the env default either way.
 
     Also regenerates any test flagged context_stale by a knowledge-library
     ingest since it was last generated (see regenerate_stale_tests) -- this
     is the single "generate tests" action a demo re-runs after ingesting
-    more knowledge, and it reports both newly-created and modified tests."""
+    more knowledge, and it reports both newly-created and modified tests.
+    Never capped by GENERATE_ALL_CAP_COUNT -- a context-stale batch is
+    usually much smaller than the full gap list, and capping which tests
+    get refreshed (as opposed to how many new ones get created) would leave
+    some tests silently still describing a stale, pre-ingest context."""
     cov = get_coverage()
-    gap_ids = [g["requirement_id"] for g in cov["gaps_after_existing_tests"]]
-    if limit is not None:
+    all_gap_ids = [g["requirement_id"] for g in cov["gaps_after_existing_tests"]]
+    gap_ids = all_gap_ids
+    if limit is None:
+        if GENERATE_ALL_CAP_ENABLED:
+            gap_ids = gap_ids[:GENERATE_ALL_CAP_COUNT]
+    elif limit != -1:
         gap_ids = gap_ids[:limit]
+    # limit == -1: explicit no-cap override, gap_ids stays the full list.
+    remaining_after = len(all_gap_ids) - len(gap_ids)
     if not gap_ids:
         result = {"batch_id": None, "created": [], "skipped_already_covered": [], "gap_count_before": 0}
     else:
@@ -1821,6 +1854,10 @@ def generate_all_gaps(batch_label: str = "bulk-fill-all-gaps", limit: int = None
 
     stale_result = regenerate_stale_tests(batch_label=batch_label)
     result["modified"] = stale_result["modified"]
+    # >0 only when the env-configured (or an explicit positive) cap actually
+    # truncated the batch -- lets a caller/UI show "N more still uncovered"
+    # instead of a capped run silently looking like "everything's done."
+    result["gaps_remaining_uncapped"] = remaining_after
     return result
 
 

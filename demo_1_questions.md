@@ -67,7 +67,14 @@ Nothing is sent to a third service beyond that.
 It's usage against your existing Claude Code session/subscription, not a
 separate per-token bill you have to track — that was the whole point of
 the key-less backend. A real 40-test bulk-generation batch took about 5
-minutes wall-clock with 4 requirements running concurrently.
+minutes wall-clock with 4 requirements running concurrently. That said,
+usage is still real and bounded by your account's quota — a bulk-fill
+action on a freshly-ingested RFC can mean 100+ real model calls from one
+click, which is exactly what happened during this tool's own demo
+verification. `POST /api/generate-all` is capped by default now
+(`GENERATE_ALL_CAP_ENABLED`/`GENERATE_ALL_CAP_COUNT`, 20 by default) so a
+single action can't silently exhaust a quota; an explicit `limit: -1`
+still lets you opt into an uncapped run when you want one.
 
 **Q: Could we swap in GPT or Gemini instead of Claude?**
 Technically the backend is pluggable, but it isn't done and isn't
