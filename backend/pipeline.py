@@ -46,6 +46,31 @@ GENERATION_CONCURRENCY = max(1, int(os.environ.get("AI_GENERATION_CONCURRENCY", 
 GENERATE_ALL_CAP_ENABLED = os.environ.get("GENERATE_ALL_CAP_ENABLED", "true").strip().lower() != "false"
 GENERATE_ALL_CAP_COUNT = max(1, int(os.environ.get("GENERATE_ALL_CAP_COUNT", "20")))
 
+# Whether generate_tests()/regenerate_stale_tests() automatically refresh
+# generated_tests/deduplicated/ after every batch. Deduplication itself
+# (_dedup_key below) is plain Python -- a (test_type, protocol_reasoning)
+# tuple comparison, no AI call involved -- so this isn't a cost control like
+# GENERATE_ALL_CAP_* above; it exists purely so the auto-refresh side effect
+# is opt-in, not assumed. Defaults to false -- refresh manually via
+# refresh_deduplicated_tests() (POST /api/dedup/refresh, `make
+# dedup-refresh`) whenever you actually want the deduplicated/pytest view
+# (and "Run deduplicated tests") to reflect the latest catalog.
+AUTO_DEDUP_ENABLED = os.environ.get("AUTO_DEDUP_ENABLED", "false").strip().lower() == "true"
+
+# When true, only a Test Intent the model itself rated "high" confidence
+# (generation_mode == "ai-high") gets persisted as a test; anything else --
+# ai-medium, ai-low, or any heuristic-fallback variant -- is held back and
+# the requirement stays an open gap (has_generated_test is NOT set), to be
+# retried on a later generate call rather than accepting a lower-confidence
+# result. No retry loop is attempted within a single call -- that would
+# mean an unbounded number of extra real AI calls per requirement, directly
+# at odds with GENERATE_ALL_CAP_* above. Real consequence to know about:
+# a requirement the model is never confident about (genuinely ambiguous
+# wording, no clear observation point) can stay an open gap indefinitely
+# under this flag, costing a real call on every generate-all run that
+# still includes it -- pair with a `limit` if that matters to you.
+REQUIRE_HIGH_CONFIDENCE = os.environ.get("REQUIRE_HIGH_CONFIDENCE", "false").strip().lower() == "true"
+
 BASE = Path(__file__).resolve().parent
 KB_DIR = BASE / "kb"
 DOCS_DIR = BASE / "generated_tests" / "docs"
@@ -85,6 +110,14 @@ MAX_TEST_CONTENT_CHARS = 8000
 # ------------------------------------------------------------------ #
 
 PROCESS_LOG_PATH = LOGS_DIR / "generation.log"
+# Separate, append-only file (same backend/logs/ directory as the process
+# log above) recording every real pytest run's full stdout/stderr plus a
+# summary line -- run_deduplicated_tests() already returns a structured
+# pass/fail/error summary to the caller, but that's only ever seen in the
+# one HTTP response; this is the persistent, after-the-fact record of what
+# each run actually printed, for when someone wants to audit a specific run
+# rather than the live dashboard result.
+PYTEST_RUN_LOG_PATH = LOGS_DIR / "test_run.log"
 
 
 def _setup_process_log_file():
@@ -1442,6 +1475,24 @@ def refresh_deduplicated_tests() -> dict:
     return {"total": len(rows), "unique": kept, "duplicates_ignored": duplicates_ignored}
 
 
+def _append_pytest_run_log(cmd: list, returncode, stdout: str, stderr: str, summary_line: str):
+    """Appends one timestamped block to PYTEST_RUN_LOG_PATH -- separate from
+    PROCESS_LOG_PATH (generation.log), same backend/logs/ directory, so a
+    real pytest run's full output survives past the one HTTP response that
+    originally returned it. Append-only like generation.log, never
+    truncated/overwritten -- each run adds a new block."""
+    with open(PYTEST_RUN_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(f"\n{'=' * 80}\n")
+        f.write(f"{datetime.datetime.now().isoformat(timespec='seconds')} -- pytest run against "
+                f"{DEDUP_PYTEST_DIR.relative_to(BASE)}\n")
+        f.write(f"Command: {' '.join(cmd)}\n")
+        f.write(f"Return code: {returncode}\n")
+        f.write(f"{'-' * 80}\nSTDOUT:\n{stdout}\n")
+        if stderr:
+            f.write(f"{'-' * 80}\nSTDERR:\n{stderr}\n")
+        f.write(f"{'-' * 80}\n{summary_line}\n")
+
+
 def run_deduplicated_tests(timeout_seconds: int = 300) -> dict:
     """Actually executes every test in generated_tests/deduplicated/pytest
     via a real `pytest` subprocess (the same interpreter/venv this Flask
@@ -1464,6 +1515,11 @@ def run_deduplicated_tests(timeout_seconds: int = 300) -> dict:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds, cwd=str(BASE))
     except subprocess.TimeoutExpired as e:
         logger.warning(f"Test run timed out after {timeout_seconds}s")
+        # e.stdout/e.stderr are populated (bytes/str, decoded since text=True
+        # was passed to the run() call that raised) with whatever the
+        # process had already produced before being killed.
+        _append_pytest_run_log(cmd, None, e.stdout or "", e.stderr or "",
+                                f"TIMED OUT after {timeout_seconds}s -- {len(test_files)} test file(s) queued")
         return {"total": len(test_files), "passed": 0, "failed": 0, "errored": len(test_files), "tests": [],
                 "note": f"Test run timed out after {timeout_seconds}s", "returncode": None}
 
@@ -1490,6 +1546,10 @@ def run_deduplicated_tests(timeout_seconds: int = 300) -> dict:
                 "message": message,
             })
 
+    summary_line = (f"Summary: total={len(tests)} passed={passed} failed={failed} "
+                     f"errored={errored} skipped={skipped} returncode={proc.returncode}")
+    _append_pytest_run_log(cmd, proc.returncode, proc.stdout, proc.stderr, summary_line)
+
     summary = {
         "total": len(tests), "passed": passed, "failed": failed, "errored": errored, "skipped": skipped,
         "tests": tests, "returncode": proc.returncode, "stdout_tail": proc.stdout[-3000:],
@@ -1506,7 +1566,9 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
     AI reasoning step for a Test Intent, validates it, and renders doc +
     pytest through the deterministic templates. Falls back to a heuristic
     Test Intent if no AI backend is available or the AI call/response fails
-    validation -- generation always succeeds, just with lower confidence.
+    validation -- generation always succeeds, just with lower confidence,
+    UNLESS REQUIRE_HIGH_CONFIDENCE is set, in which case anything short of
+    ai-high is held back instead (see that flag's own comment above).
 
     The AI-call/render step for each requirement (_generate_one) touches no
     shared state, so it runs concurrently across GENERATION_CONCURRENCY
@@ -1514,6 +1576,7 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
     requirements is wall-clock time, and each call is I/O-bound (subprocess
     or network), not CPU-bound. All DB writes and file writes happen
     afterward, sequentially, on the single connection below."""
+    calls_before = ai_generation.get_model_call_count()
     conn = get_conn()
     batch_row = conn.execute("SELECT COALESCE(MAX(batch_id),0)+1 AS b FROM test_intents").fetchone()
     batch_id = batch_row["b"]
@@ -1540,6 +1603,7 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
                 f"{len(skipped)} skipped (already covered or unknown)")
 
     created = []
+    skipped_low_confidence = []
     if to_process:
         with ThreadPoolExecutor(max_workers=min(GENERATION_CONCURRENCY, len(to_process))) as pool:
             futures = [pool.submit(_generate_one, req_dict, rfc_label, artefact_context, derived_from, profile)
@@ -1552,6 +1616,12 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
             rec = records.get(req_dict["requirement_id"])
             if rec is None:
                 skipped.append(req_dict["requirement_id"])
+                continue
+            if REQUIRE_HIGH_CONFIDENCE and rec["mode"] != "ai-high":
+                # Held back, not persisted -- has_generated_test stays 0, so
+                # this requirement remains an open gap a later generate call
+                # will retry, instead of locking in a lower-confidence result.
+                skipped_low_confidence.append(req_dict["requirement_id"])
                 continue
 
             (DOCS_DIR / f"{rec['test_id']}.md").write_text(rec["doc_content"], encoding="utf-8")
@@ -1579,17 +1649,23 @@ def generate_tests(requirement_ids: list, batch_label: str = "manual", derived_f
 
     active_backend = ai_generation.get_active_backend_key()
     ai_mode_note = f"AI reasoning via {active_backend}" if active_backend else "heuristic templates (no AI backend available)"
+    calls_made = ai_generation.get_model_call_count() - calls_before
+    low_conf_note = f", {len(skipped_low_confidence)} held back (below REQUIRE_HIGH_CONFIDENCE)" if skipped_low_confidence else ""
     _log(
         conn,
-        f"TESTS_GENERATED (batch #{batch_id}, {len(created)} new tests, label='{batch_label}', mode={ai_mode_note})",
+        f"TESTS_GENERATED (batch #{batch_id}, {len(created)} new tests, label='{batch_label}', mode={ai_mode_note}, "
+        f"{calls_made} model call(s) made{low_conf_note})",
         "kb/knowledge.db ONLY -- raw RFC text not reopened",
     )
     conn.commit()
     conn.close()
-    logger.info(f"Batch #{batch_id} complete: {len(created)} created, {len(skipped)} skipped, mode={ai_mode_note}")
+    logger.info(f"Batch #{batch_id} complete: {len(created)} created, {len(skipped)} skipped, "
+                f"{len(skipped_low_confidence)} held back low-confidence, {calls_made} model call(s) made, "
+                f"mode={ai_mode_note}")
 
-    dedup_summary = refresh_deduplicated_tests()
-    return {"batch_id": batch_id, "created": created, "skipped_already_covered": skipped, "dedup": dedup_summary}
+    dedup_summary = refresh_deduplicated_tests() if AUTO_DEDUP_ENABLED else None
+    return {"batch_id": batch_id, "created": created, "skipped_already_covered": skipped,
+            "skipped_low_confidence": skipped_low_confidence, "dedup": dedup_summary, "model_calls_made": calls_made}
 
 
 # ------------------------------------------------------------------ #
@@ -1743,14 +1819,18 @@ def regenerate_stale_tests(batch_label: str = "context-refresh") -> dict:
     incremental ingest flags, but a real batch (11+ stale tests found while
     verifying the knowledge-library demo) took noticeably longer than the
     equivalently-sized "create" pass for no good reason, since neither pass
-    is CPU-bound."""
+    is CPU-bound. If REQUIRE_HIGH_CONFIDENCE is set, a regeneration that
+    comes back below ai-high leaves the existing row untouched (still
+    context_stale=1) rather than overwriting a possibly-better test with a
+    worse one -- it'll be retried on the next generate call."""
+    calls_before = ai_generation.get_model_call_count()
     conn = get_conn()
     stale_rows = [dict(r) for r in conn.execute(
         "SELECT test_id, requirement_id, derived_from FROM test_intents WHERE context_stale=1"
     ).fetchall()]
     if not stale_rows:
         conn.close()
-        return {"modified": []}
+        return {"modified": [], "skipped_low_confidence": [], "model_calls_made": 0}
 
     rfc_row = conn.execute("SELECT rfc_number, rfc_title FROM rfc_meta WHERE id=1").fetchone()
     rfc_label = f"RFC {rfc_row['rfc_number']} ({rfc_row['rfc_title']})" if rfc_row else "RFC"
@@ -1765,6 +1845,7 @@ def regenerate_stale_tests(batch_label: str = "context-refresh") -> dict:
         to_process.append((dict(req_row), row["derived_from"] or ""))
 
     modified = []
+    skipped_low_confidence = []
     if to_process:
         with ThreadPoolExecutor(max_workers=min(GENERATION_CONCURRENCY, len(to_process))) as pool:
             futures = [pool.submit(_generate_one, req_dict, rfc_label, artefact_context, derived_from, profile)
@@ -1777,6 +1858,12 @@ def regenerate_stale_tests(batch_label: str = "context-refresh") -> dict:
         for req_dict, _derived_from in to_process:
             rec = records.get(req_dict["requirement_id"])
             if rec is None:
+                continue
+            if REQUIRE_HIGH_CONFIDENCE and rec["mode"] != "ai-high":
+                # Leave the existing row as-is, context_stale still 1 --
+                # don't downgrade a possibly-better existing test with a
+                # lower-confidence regeneration; retried on a later call.
+                skipped_low_confidence.append(rec["test_id"])
                 continue
 
             (DOCS_DIR / f"{rec['test_id']}.md").write_text(rec["doc_content"], encoding="utf-8")
@@ -1797,14 +1884,20 @@ def regenerate_stale_tests(batch_label: str = "context-refresh") -> dict:
             )
             modified.append(rec["test_id"])
 
+    calls_made = ai_generation.get_model_call_count() - calls_before
+    low_conf_note = f", {len(skipped_low_confidence)} held back (below REQUIRE_HIGH_CONFIDENCE)" if skipped_low_confidence else ""
     _log(conn, f"TESTS_MODIFIED (batch label='{batch_label}', {len(modified)} existing test(s) regenerated "
-                f"due to newly ingested related knowledge)", "kb/knowledge.db ONLY -- raw RFC text not reopened")
+                f"due to newly ingested related knowledge, {calls_made} model call(s) made{low_conf_note})",
+         "kb/knowledge.db ONLY -- raw RFC text not reopened")
     conn.commit()
     conn.close()
-    logger.info(f"regenerate_stale_tests: {len(modified)} test(s) regenerated (batch label='{batch_label}')")
+    logger.info(f"regenerate_stale_tests: {len(modified)} test(s) regenerated, "
+                f"{len(skipped_low_confidence)} held back low-confidence, {calls_made} model call(s) made "
+                f"(batch label='{batch_label}')")
 
-    refresh_deduplicated_tests()
-    return {"modified": modified}
+    if AUTO_DEDUP_ENABLED:
+        refresh_deduplicated_tests()
+    return {"modified": modified, "skipped_low_confidence": skipped_low_confidence, "model_calls_made": calls_made}
 
 
 def generate_all_gaps(batch_label: str = "bulk-fill-all-gaps", limit: int = None):
@@ -1847,13 +1940,16 @@ def generate_all_gaps(batch_label: str = "bulk-fill-all-gaps", limit: int = None
     # limit == -1: explicit no-cap override, gap_ids stays the full list.
     remaining_after = len(all_gap_ids) - len(gap_ids)
     if not gap_ids:
-        result = {"batch_id": None, "created": [], "skipped_already_covered": [], "gap_count_before": 0}
+        result = {"batch_id": None, "created": [], "skipped_already_covered": [], "gap_count_before": 0,
+                   "skipped_low_confidence": [], "model_calls_made": 0}
     else:
         result = generate_tests(gap_ids, batch_label=batch_label)
         result["gap_count_before"] = len(gap_ids)
 
     stale_result = regenerate_stale_tests(batch_label=batch_label)
     result["modified"] = stale_result["modified"]
+    result["skipped_low_confidence"] = result["skipped_low_confidence"] + stale_result["skipped_low_confidence"]
+    result["model_calls_made"] = result["model_calls_made"] + stale_result["model_calls_made"]
     # >0 only when the env-configured (or an explicit positive) cap actually
     # truncated the batch -- lets a caller/UI show "N more still uncovered"
     # instead of a capped run silently looking like "everything's done."
@@ -1869,6 +1965,12 @@ def get_ai_status():
         "backend": ai_generation.get_active_backend_key(),
         "backend_mode_requested": ai_generation.AI_BACKEND_MODE,
         "mode": "ai" if available else "heuristic",
+        # Cumulative real AI backend calls attempted since this process
+        # started (see ai_generation._record_model_call) -- not per-batch,
+        # see each generate call's own "model_calls_made" for that.
+        "model_calls_total": ai_generation.get_model_call_count(),
+        "require_high_confidence": REQUIRE_HIGH_CONFIDENCE,
+        "auto_dedup_enabled": AUTO_DEDUP_ENABLED,
     }
 
 

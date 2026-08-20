@@ -71,6 +71,30 @@ _backend = None
 _backend_checked = False
 _backend_lock = threading.Lock()
 
+# Cumulative count of real backend.complete() calls actually attempted
+# (success or failure) since this process started -- deliberately NOT the
+# same as "how many requirements were queued for generation," since in
+# heuristic-only mode (no backend available) zero real calls happen no
+# matter how many requirements are queued. _record_model_call() is called
+# right before every backend.complete() invocation, in both
+# generate_ai_test_intent and analyze_existing_test_coverage below.
+_model_call_count = 0
+_model_call_count_lock = threading.Lock()
+
+
+def _record_model_call():
+    global _model_call_count
+    with _model_call_count_lock:
+        _model_call_count += 1
+
+
+def get_model_call_count() -> int:
+    """Cumulative real AI backend calls attempted since process start (see
+    pipeline.get_ai_status()'s model_calls_total). Never reset -- callers
+    that want a per-batch count (see pipeline.generate_tests()) snapshot
+    this before and after and log the delta."""
+    return _model_call_count
+
 
 def _select_backend():
     """Lazy singleton, resolved at most once even under concurrent callers
@@ -416,6 +440,7 @@ def generate_ai_test_intent(rfc_label: str, req_row: dict, related: list, profil
         return None, "heuristic-fallback:no-ai-backend"
 
     try:
+        _record_model_call()
         text = backend.complete(_build_system_prompt(profile),
                                  _build_user_prompt(rfc_label, req_row, related, artefact_context),
                                  max_tokens=1000)
@@ -558,6 +583,7 @@ def analyze_existing_test_coverage(rfc_label: str, filename: str, test_content: 
         return _heuristic_coverage_match(test_content, candidates), "heuristic-fallback:no-ai-backend"
 
     try:
+        _record_model_call()
         text = backend.complete(
             _build_coverage_system_prompt(profile),
             _build_coverage_user_prompt(rfc_label, filename, test_content, candidates, artefact_context),

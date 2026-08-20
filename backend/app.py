@@ -98,6 +98,19 @@ def api_run_tests():
     return jsonify(result)
 
 
+@app.post("/api/dedup/refresh")
+def api_dedup_refresh():
+    """Manually (re)builds generated_tests/deduplicated/{docs,pytest} from
+    the current test_intents catalog. Deduplication itself is plain Python
+    (a test_type/protocol_reasoning comparison, no AI call), but the
+    automatic refresh-after-every-generation-batch behavior is opt-in
+    (AUTO_DEDUP_ENABLED, default false, see pipeline.py) -- this endpoint
+    is the manual trigger for whenever you actually want the deduplicated
+    view (and 'Run deduplicated tests') caught up with the latest catalog,
+    regardless of that setting."""
+    return jsonify(pipeline.refresh_deduplicated_tests())
+
+
 @app.get("/api/batches")
 def api_batches():
     return jsonify(pipeline.get_batches())
